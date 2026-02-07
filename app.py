@@ -2,12 +2,15 @@ import sqlite3
 import random
 import math
 import os
+import io
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 DB_PATH = "tournament.db"
 
@@ -1286,6 +1289,346 @@ def download_csv_button(df: pd.DataFrame, label: str, filename: str):
     st.download_button(label, data=csv, file_name=filename, mime="text/csv")
 
 
+def export_tournament_excel(tournament_id: int) -> bytes:
+    """Генерирует полный Excel-отчёт по турниру (все этапы)."""
+    from openpyxl import Workbook
+
+    tourn = get_tournament(tournament_id)
+    disc = str(tourn["discipline"])
+    is_sim_export = disc in ("sim_individual", "sim_team")
+    is_team_export = disc == "sim_team"
+    scoring_mode_exp = str(tourn.get("scoring_mode", "none"))
+    time_limit_exp = float(tourn["time_limit_seconds"])
+    total_laps_exp = int(tourn["total_laps"])
+
+    DISCIPLINES_RU = {
+        "drone_individual": "Дроны: Личный зачёт",
+        "sim_individual": "Симулятор: Личный зачёт",
+        "sim_team": "Симулятор: Командный зачёт",
+    }
+
+    wb = Workbook()
+    header_font = Font(bold=True, size=12, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="2C3E50")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    green_fill = PatternFill("solid", fgColor="D5F5E3")
+    red_fill = PatternFill("solid", fgColor="FADBD8")
+    gold_fill = PatternFill("solid", fgColor="F9E79F")
+    silver_fill = PatternFill("solid", fgColor="D5DBDB")
+    bronze_fill = PatternFill("solid", fgColor="E8DAEF")
+    subheader_font = Font(bold=True, size=11)
+    subheader_fill = PatternFill("solid", fgColor="D6EAF8")
+
+    def style_header(ws, row_num, max_col):
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=row_num, column=col)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            cell.border = thin_border
+
+    def style_data_row(ws, row_num, max_col, fill=None):
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=row_num, column=col)
+            cell.alignment = cell_align
+            cell.border = thin_border
+            if fill:
+                cell.fill = fill
+
+    def auto_width(ws):
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col_cells[0].column)
+            for cell in col_cells:
+                val = str(cell.value) if cell.value is not None else ""
+                max_len = max(max_len, len(val))
+            ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+
+    def write_df(ws, df, start_row=1, advancing=None, medal_col=False):
+        """Записывает DataFrame на лист с форматированием."""
+        headers = list(df.columns)
+        for c_idx, h in enumerate(headers, 1):
+            ws.cell(row=start_row, column=c_idx, value=h)
+        style_header(ws, start_row, len(headers))
+
+        for r_idx, (_, row) in enumerate(df.iterrows(), start_row + 1):
+            fill = None
+            if advancing is not None and "М" in df.columns:
+                place = row.get("М", r_idx - start_row)
+                if isinstance(place, (int, float)) and place <= advancing:
+                    fill = green_fill
+                elif isinstance(place, (int, float)):
+                    fill = red_fill
+            if medal_col and "М" in df.columns:
+                place = row.get("М", 999)
+                if place == 1:
+                    fill = gold_fill
+                elif place == 2:
+                    fill = silver_fill
+                elif place == 3:
+                    fill = bronze_fill
+            for c_idx, h in enumerate(headers, 1):
+                ws.cell(row=r_idx, column=c_idx, value=row[h])
+            style_data_row(ws, r_idx, len(headers), fill)
+        return start_row + len(df) + 1
+
+    # ===== Лист 1: Информация о турнире =====
+    ws_info = wb.active
+    ws_info.title = "Турнир"
+    info_data = [
+        ("Турнир", str(tourn["name"])),
+        ("Дисциплина", DISCIPLINES_RU.get(disc, disc)),
+        ("Статус", str(tourn["status"])),
+        ("Лимит времени (сек)", time_limit_exp),
+        ("Кругов", total_laps_exp),
+        ("Дата создания", str(tourn.get("created_at", "—"))),
+    ]
+    if is_sim_export:
+        info_data.append(("Подсчёт очков", "Сумма за 6 вылетов (2 трассы × 3 попытки)"))
+    if is_team_export:
+        info_data.append(("Формат", "Командный (2 пилота, время суммируется)"))
+    for r, (label, val) in enumerate(info_data, 1):
+        ws_info.cell(row=r, column=1, value=label).font = Font(bold=True)
+        ws_info.cell(row=r, column=2, value=val)
+    auto_width(ws_info)
+
+    # ===== Лист 2: Участники =====
+    ws_part = wb.create_sheet("Участники")
+    participants_raw = qdf("""SELECT id, start_number, name
+                              FROM participants WHERE tournament_id=?
+                              ORDER BY COALESCE(start_number, 9999), name""", (tournament_id,))
+
+    if not participants_raw.empty:
+        if is_team_export:
+            tp_df = qdf("SELECT participant_id, pilot1_name, pilot2_name FROM team_pilots WHERE participant_id IN ({})".format(
+                ",".join(str(int(x)) for x in participants_raw["id"].tolist())))
+            tp_map = {}
+            for _, tpr in tp_df.iterrows():
+                tp_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
+            rows = []
+            for _, r in participants_raw.iterrows():
+                pid = int(r["id"])
+                pilots = tp_map.get(pid, ("", ""))
+                rows.append({
+                    "№": int(r["start_number"]) if pd.notna(r["start_number"]) else "",
+                    "Команда": r["name"],
+                    "Пилот 1": pilots[0],
+                    "Пилот 2": pilots[1],
+                })
+            df_p = pd.DataFrame(rows)
+        else:
+            rows = []
+            for _, r in participants_raw.iterrows():
+                rows.append({
+                    "№": int(r["start_number"]) if pd.notna(r["start_number"]) else "",
+                    "Пилот": r["name"],
+                })
+            df_p = pd.DataFrame(rows)
+        write_df(ws_part, df_p)
+    auto_width(ws_part)
+
+    # ===== Лист 3: Квалификация =====
+    ws_qual = wb.create_sheet("Квалификация")
+    ranking = get_qual_ranking(tournament_id)
+    if not ranking.empty:
+        advancing = compute_bracket_size(len(ranking))
+        entity = "Команда" if is_team_export else "Пилот"
+
+        if is_sim_export:
+            qdf_data = ranking[["place", "name", "start_number", "time_seconds", "laps_completed"]].copy()
+            qdf_data.columns = ["М", entity, "№", "Время (сек)", "Круги"]
+        else:
+            qdf_data = ranking[["place", "name", "start_number", "time_seconds",
+                                "laps_completed", "completed_all_laps", "projected_time"]].copy()
+            qdf_data.columns = ["М", entity, "№", "Время (сек)", "Круги", "Все круги", "Расчётное время"]
+
+        # Заполняем расчётное форматированным
+        if "Расчётное время" in qdf_data.columns:
+            qdf_data["Расчётное время"] = qdf_data["Расчётное время"].apply(
+                lambda x: format_time(x) if pd.notna(x) else "—")
+
+        ws_qual.cell(row=1, column=1, value=f"Проходят: {advancing} из {len(ranking)}").font = Font(bold=True, size=11)
+        write_df(ws_qual, qdf_data, start_row=3, advancing=advancing)
+    auto_width(ws_qual)
+
+    # ===== Листы 4+: Этапы плей-офф / группового этапа =====
+    bracket_exp = get_bracket_for_tournament(tournament_id)
+    all_stages_exp = get_all_stages(tournament_id)
+
+    if bracket_exp and not all_stages_exp.empty:
+        for sidx, sd in enumerate(bracket_exp):
+            srow = all_stages_exp[all_stages_exp["stage_idx"] == sidx]
+            if srow.empty:
+                continue
+            stage_id_exp = int(srow.iloc[0]["id"])
+            sname = sd.display_name.get("ru", sd.code)
+            is_final_stage = sd.code == "F"
+
+            # Безопасное имя листа (макс 31 символ)
+            sheet_name = sname[:31]
+            ws_stage = wb.create_sheet(sheet_name)
+            current_row = 1
+
+            if is_final_stage:
+                # === ФИНАЛ ===
+                ws_stage.cell(row=current_row, column=1, value=f"ФИНАЛ — {sname}").font = Font(bold=True, size=13)
+                current_row += 2
+
+                if is_sim_export:
+                    # Sim final: show per-track/attempt results + final standings
+                    for tr in [1, 2]:
+                        for att in [1, 2, 3]:
+                            results = get_heat_results(stage_id_exp, 1, att, tr)
+                            if results:
+                                ent = "Команда" if is_team_export else "Пилот"
+                                ws_stage.cell(row=current_row, column=1,
+                                              value=f"Трасса {tr}, Попытка {att}").font = subheader_font
+                                ws_stage.cell(row=current_row, column=1).fill = subheader_fill
+                                current_row += 1
+                                tdata = [{"М": r["place"], ent: r["name"],
+                                          "Время": format_time(r.get("time_seconds")),
+                                          "Круги": r.get("laps_completed", "—"),
+                                          "Очки": int(r.get("points", 0))} for r in results]
+                                df_heat = pd.DataFrame(tdata)
+                                current_row = write_df(ws_stage, df_heat, current_row)
+                                current_row += 1
+
+                    # Final standings
+                    ws_stage.cell(row=current_row, column=1, value="ИТОГО ФИНАЛА").font = Font(bold=True, size=12)
+                    current_row += 1
+                    sim_fin = compute_sim_final_standings(stage_id_exp, scoring_mode_exp)
+                    if not sim_fin.empty:
+                        track_bests = get_sim_track_bests(stage_id_exp, 1)
+                        pid_col = "participant_id" if "participant_id" in sim_fin.columns else "pid"
+                        ent = "Команда" if is_team_export else "Пилот"
+                        fin_rows = []
+                        for _, row in sim_fin.iterrows():
+                            pid = int(row[pid_col])
+                            tb = track_bests.get(pid, {})
+                            t1 = format_time(tb.get("t1")) if tb.get("t1") else "—"
+                            t2 = format_time(tb.get("t2")) if tb.get("t2") else "—"
+                            fin_rows.append({
+                                "М": int(row["rank"]), ent: row["name"],
+                                "Лучш. Тр.1": t1, "Лучш. Тр.2": t2,
+                                "Очки": int(row["total_points"]),
+                            })
+                        df_fin = pd.DataFrame(fin_rows)
+                        current_row = write_df(ws_stage, df_fin, current_row, medal_col=True)
+                else:
+                    # Drone final: 3 heats + standings
+                    for heat_no in range(1, 4):
+                        results = get_heat_results(stage_id_exp, 1, heat_no)
+                        if results:
+                            ws_stage.cell(row=current_row, column=1,
+                                          value=f"Вылет {heat_no}").font = subheader_font
+                            ws_stage.cell(row=current_row, column=1).fill = subheader_fill
+                            current_row += 1
+                            tdata = [{"М": r["place"], "Пилот": r["name"],
+                                      "Время": format_time(r.get("time_seconds")),
+                                      "Круги": r.get("laps_completed", "—"),
+                                      "Все": "Да" if r.get("completed_all_laps") else "",
+                                      "Расчётное": format_time(r.get("projected_time")),
+                                      "Очки": int(r.get("points", 0))} for r in results]
+                            df_heat = pd.DataFrame(tdata)
+                            current_row = write_df(ws_stage, df_heat, current_row)
+                            current_row += 1
+
+                    # Drone final standings
+                    ws_stage.cell(row=current_row, column=1, value="ИТОГО ФИНАЛА").font = Font(bold=True, size=12)
+                    current_row += 1
+                    fin_standings = compute_final_standings(stage_id_exp)
+                    if not fin_standings.empty:
+                        fin_rows = []
+                        for _, row in fin_standings.iterrows():
+                            fin_rows.append({
+                                "М": int(row["rank"]),
+                                "Пилот": row["name"],
+                                "Очки": int(row["total_points"]),
+                                "Побед": int(row["wins"]),
+                                "Бонус": "+1" if int(row.get("bonus", 0)) > 0 else "",
+                                "Итого": int(row["total"]),
+                            })
+                        df_fin = pd.DataFrame(fin_rows)
+                        current_row = write_df(ws_stage, df_fin, current_row, medal_col=True)
+            else:
+                # === ГРУППОВОЙ ЭТАП / ПЛЕЙ-ОФФ ===
+                ws_stage.cell(row=current_row, column=1, value=sname).font = Font(bold=True, size=13)
+                current_row += 2
+
+                all_groups_exp = get_all_groups(stage_id_exp)
+                for gno, members in sorted(all_groups_exp.items()):
+                    ws_stage.cell(row=current_row, column=1,
+                                  value=f"Группа {gno}").font = subheader_font
+                    ws_stage.cell(row=current_row, column=1).fill = subheader_fill
+                    current_row += 1
+
+                    ent = "Команда" if is_team_export else "Пилот"
+
+                    if is_sim_export:
+                        # Per-track/attempt results
+                        for tr in [1, 2]:
+                            for att in [1, 2, 3]:
+                                results = get_heat_results(stage_id_exp, gno, att, tr)
+                                if results:
+                                    ws_stage.cell(row=current_row, column=1,
+                                                  value=f"  Тр.{tr} Поп.{att}").font = Font(italic=True)
+                                    current_row += 1
+                                    tdata = [{"М": r["place"], ent: r["name"],
+                                              "Время": format_time(r.get("time_seconds")),
+                                              "Очки": int(r.get("points", 0))} for r in results]
+                                    df_heat = pd.DataFrame(tdata)
+                                    current_row = write_df(ws_stage, df_heat, current_row)
+                                    current_row += 1
+
+                        # Group summary
+                        sim_rank = compute_sim_group_ranking(stage_id_exp, gno, scoring_mode_exp)
+                        if not sim_rank.empty:
+                            track_bests = get_sim_track_bests(stage_id_exp, gno)
+                            pid_col = "participant_id" if "participant_id" in sim_rank.columns else "pid"
+                            ws_stage.cell(row=current_row, column=1,
+                                          value=f"  Сводка группы {gno}").font = Font(bold=True, italic=True)
+                            current_row += 1
+                            sum_rows = []
+                            for _, sr in sim_rank.iterrows():
+                                pid = int(sr[pid_col])
+                                tb = track_bests.get(pid, {})
+                                t1 = format_time(tb.get("t1")) if tb.get("t1") else "—"
+                                t2 = format_time(tb.get("t2")) if tb.get("t2") else "—"
+                                sum_rows.append({
+                                    "М": int(sr["rank"]), ent: sr["name"],
+                                    "Лучш. Тр.1": t1, "Лучш. Тр.2": t2,
+                                    "Очки": int(sr["total_points"]),
+                                })
+                            df_sum = pd.DataFrame(sum_rows)
+                            current_row = write_df(ws_stage, df_sum, current_row, advancing=sd.qualifiers)
+                    else:
+                        # Drone: single heat per group
+                        results = get_heat_results(stage_id_exp, gno, 1)
+                        if results:
+                            tdata = [{"М": r["place"], ent: r["name"],
+                                      "Время": format_time(r.get("time_seconds")),
+                                      "Круги": r.get("laps_completed", "—"),
+                                      "Все": "Да" if r.get("completed_all_laps") else "",
+                                      "Расчётное": format_time(r.get("projected_time"))} for r in results]
+                            df_heat = pd.DataFrame(tdata)
+                            current_row = write_df(ws_stage, df_heat, current_row, advancing=sd.qualifiers)
+
+                    current_row += 2  # отступ между группами
+
+            auto_width(ws_stage)
+
+    # Записываем в буфер
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def format_time(seconds: Optional[float]) -> str:
     """Форматирует секунды в мм:сс.мс"""
     if seconds is None:
@@ -1499,6 +1842,25 @@ with tabs[0]:
             progress_html += f'<span class="progress-stage {css}">{sname}</span>'
         progress_html += '</div>'
         st.markdown(progress_html, unsafe_allow_html=True)
+
+    # --- Экспорт турнира в Excel ---
+    if t_status != "setup":
+        st.divider()
+        st.markdown("### 📥 Экспорт турнира")
+        st.caption("Скачайте полный отчёт по турниру в формате Excel (все этапы, результаты, сводки)")
+        try:
+            excel_data = export_tournament_excel(tournament_id)
+            safe_name = str(tourn["name"]).replace(" ", "_").replace("/", "-")[:30]
+            st.download_button(
+                label="📥 Скачать полный отчёт (Excel)",
+                data=excel_data,
+                file_name=f"Турнир_{safe_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(f"Ошибка при генерации отчёта: {e}")
 
 # ============================================================
 # TAB 1: Участники
