@@ -618,20 +618,39 @@ def init_db():
     except Exception:
         pass  # столбец уже существует
 
-    try:
-        c.execute("ALTER TABLE heats ADD COLUMN track_no INTEGER NOT NULL DEFAULT 1")
-    except Exception:
-        pass  # столбец уже существует
-
-    # Пересоздаём уникальный индекс для heats, если старый (без track_no) ещё на месте
-    try:
-        c.execute("DROP INDEX IF EXISTS sqlite_autoindex_heats_1")
-    except Exception:
-        pass
-    try:
-        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_heats_group_track_heat ON heats(group_id, track_no, heat_no)")
-    except Exception:
-        pass
+    # Миграция heats: пересоздаём таблицу с правильным UNIQUE constraint
+    # Проверяем, есть ли столбец track_no и правильный ли constraint
+    cols = [row[1] for row in c.execute("PRAGMA table_info(heats)").fetchall()]
+    if "track_no" not in cols:
+        # Старая таблица без track_no — пересоздаём
+        c.execute("""CREATE TABLE IF NOT EXISTS heats_new(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            heat_no INTEGER NOT NULL,
+            track_no INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(group_id, track_no, heat_no),
+            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+        )""")
+        c.execute("INSERT INTO heats_new(id, group_id, heat_no, track_no) SELECT id, group_id, heat_no, 1 FROM heats")
+        c.execute("DROP TABLE heats")
+        c.execute("ALTER TABLE heats_new RENAME TO heats")
+    else:
+        # track_no есть, но возможно constraint старый — проверяем
+        # Пробуем вставить тестовую запись, которая бы нарушила старый constraint
+        # Безопаснее: пересоздать если autoindex всё ещё старый
+        index_info = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='heats'").fetchone()
+        if index_info and "UNIQUE(group_id, heat_no)" in (index_info[0] or ""):
+            c.execute("""CREATE TABLE IF NOT EXISTS heats_new(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                heat_no INTEGER NOT NULL,
+                track_no INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(group_id, track_no, heat_no),
+                FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+            )""")
+            c.execute("INSERT INTO heats_new(id, group_id, heat_no, track_no) SELECT id, group_id, heat_no, track_no FROM heats")
+            c.execute("DROP TABLE heats")
+            c.execute("ALTER TABLE heats_new RENAME TO heats")
 
     conn.commit()
     conn.close()
