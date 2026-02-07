@@ -1136,6 +1136,61 @@ def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
     exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(cur["id"]),))
 
 
+def rollback_to_previous_stage(tournament_id: int, bracket: List[StageDef]):
+    """Откат на предыдущий этап: удаляет текущий активный этап и реактивирует предыдущий."""
+    stages_df = get_all_stages(tournament_id)
+
+    # Если турнир завершён — снимаем статус finished и реактивируем финал
+    tourn = get_tournament(tournament_id)
+    if str(tourn["status"]) == "finished":
+        # Находим последний этап (финал)
+        last = stages_df[stages_df["status"] == "done"].sort_values("stage_idx", ascending=False)
+        if not last.empty:
+            last_id = int(last.iloc[0]["id"])
+            exec_sql("UPDATE stages SET status='active' WHERE id=?", (last_id,))
+            exec_sql("UPDATE tournaments SET status='bracket' WHERE id=?", (tournament_id,))
+        return
+
+    active = stages_df[stages_df["status"] == "active"]
+    if active.empty:
+        return
+    cur = active.iloc[0]
+    cur_idx = int(cur["stage_idx"])
+    cur_stage_id = int(cur["id"])
+
+    if cur_idx == 0:
+        # Первый этап — откатываемся в квалификацию
+        # Удаляем все данные этапа
+        groups = qdf("SELECT id FROM groups WHERE stage_id=?", (cur_stage_id,))
+        for _, g in groups.iterrows():
+            gid = int(g["id"])
+            heats = qdf("SELECT id FROM heats WHERE group_id=?", (gid,))
+            for _, h in heats.iterrows():
+                exec_sql("DELETE FROM heat_results WHERE heat_id=?", (int(h["id"]),))
+            exec_sql("DELETE FROM heats WHERE group_id=?", (gid,))
+            exec_sql("DELETE FROM group_members WHERE group_id=?", (gid,))
+        exec_sql("DELETE FROM groups WHERE stage_id=?", (cur_stage_id,))
+        exec_sql("DELETE FROM stages WHERE id=?", (cur_stage_id,))
+        exec_sql("UPDATE tournaments SET status='qualification' WHERE id=?", (tournament_id,))
+    else:
+        # Удаляем текущий этап и реактивируем предыдущий
+        groups = qdf("SELECT id FROM groups WHERE stage_id=?", (cur_stage_id,))
+        for _, g in groups.iterrows():
+            gid = int(g["id"])
+            heats = qdf("SELECT id FROM heats WHERE group_id=?", (gid,))
+            for _, h in heats.iterrows():
+                exec_sql("DELETE FROM heat_results WHERE heat_id=?", (int(h["id"]),))
+            exec_sql("DELETE FROM heats WHERE group_id=?", (gid,))
+            exec_sql("DELETE FROM group_members WHERE group_id=?", (gid,))
+        exec_sql("DELETE FROM groups WHERE stage_id=?", (cur_stage_id,))
+        exec_sql("DELETE FROM stages WHERE id=?", (cur_stage_id,))
+
+        # Реактивируем предыдущий
+        prev = stages_df[stages_df["stage_idx"] == cur_idx - 1]
+        if not prev.empty:
+            exec_sql("UPDATE stages SET status='active' WHERE id=?", (int(prev.iloc[0]["id"]),))
+
+
 def start_bracket(tournament_id: int):
     """Завершить квалификацию и создать первый этап плей-офф."""
     ranking = get_qual_ranking(tournament_id)
@@ -1985,6 +2040,61 @@ with tabs[3]:
                                     st.success("🏆 Турнир завершён!")
                                     st.balloons()
                                     st.rerun()
+
+                # --- Кнопка отката на предыдущий этап ---
+                st.divider()
+                cur_sd_name = bracket[cur_idx].display_name.get(lang, bracket[cur_idx].code)
+                if cur_idx == 0:
+                    rollback_label = "⬅️ Вернуться в квалификацию"
+                else:
+                    prev_name = bracket[cur_idx - 1].display_name.get(lang, bracket[cur_idx - 1].code)
+                    rollback_label = f"⬅️ Вернуться к {prev_name}"
+
+                with st.expander(rollback_label, expanded=False):
+                    st.warning(f"⚠️ **Внимание!** Это удалит все результаты этапа «{cur_sd_name}» "
+                               f"и вернёт турнир на предыдущий этап. Действие необратимо!")
+                    rollback_key = "confirm_rollback_stage"
+                    if not st.session_state.get(rollback_key, False):
+                        if st.button("🔙 Откатить этап", use_container_width=True):
+                            st.session_state[rollback_key] = True
+                            st.rerun()
+                    else:
+                        st.error("Вы уверены? Все результаты текущего этапа будут удалены.")
+                        rc1, rc2 = st.columns(2)
+                        with rc1:
+                            if st.button("✅ Да, откатить", type="primary", use_container_width=True, key="do_rollback"):
+                                rollback_to_previous_stage(tournament_id, bracket)
+                                st.session_state[rollback_key] = False
+                                st.success("Этап откачен!")
+                                st.rerun()
+                        with rc2:
+                            if st.button("❌ Отмена", use_container_width=True, key="cancel_rollback"):
+                                st.session_state[rollback_key] = False
+                                st.rerun()
+
+        # Кнопка отката для завершённых турниров
+        if t_status == "finished":
+            st.divider()
+            with st.expander("⬅️ Вернуть турнир в финал", expanded=False):
+                st.warning("⚠️ Это снимет статус «Завершён» и вернёт турнир в финальный этап для редактирования.")
+                rollback_fin_key = "confirm_rollback_finished"
+                if not st.session_state.get(rollback_fin_key, False):
+                    if st.button("🔙 Вернуть в финал", use_container_width=True):
+                        st.session_state[rollback_fin_key] = True
+                        st.rerun()
+                else:
+                    st.error("Вы уверены?")
+                    fc1, fc2 = st.columns(2)
+                    with fc1:
+                        if st.button("✅ Да", type="primary", use_container_width=True, key="do_rollback_fin"):
+                            rollback_to_previous_stage(tournament_id, bracket)
+                            st.session_state[rollback_fin_key] = False
+                            st.success("Турнир возвращён в финал!")
+                            st.rerun()
+                    with fc2:
+                        if st.button("❌ Отмена", use_container_width=True, key="cancel_rollback_fin"):
+                            st.session_state[rollback_fin_key] = False
+                            st.rerun()
 
 
 # ============================================================
