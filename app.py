@@ -9,8 +9,6 @@ from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 DB_PATH = "tournament.db"
 
@@ -1292,6 +1290,8 @@ def download_csv_button(df: pd.DataFrame, label: str, filename: str):
 def export_tournament_excel(tournament_id: int) -> bytes:
     """Генерирует полный Excel-отчёт по турниру (все этапы)."""
     from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
 
     tourn = get_tournament(tournament_id)
     disc = str(tourn["discipline"])
