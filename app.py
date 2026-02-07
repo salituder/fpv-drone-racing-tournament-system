@@ -1608,8 +1608,21 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                             df_sum = pd.DataFrame(sum_rows)
                             current_row = write_df(ws_stage, df_sum, current_row, advancing=sd.qualifiers)
                     else:
-                        # Drone: single heat per group
+                        # Drone: single heat per group — пробуем прямой запрос
                         results = get_heat_results(stage_id_exp, gno, 1)
+                        if not results:
+                            # Fallback: может быть track_no другой — ищем любой heat
+                            gid_fb = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id_exp, gno))
+                            if not gid_fb.empty:
+                                gid_val = int(gid_fb.iloc[0]["id"])
+                                fb_heat = qdf("SELECT id, heat_no FROM heats WHERE group_id=? ORDER BY heat_no LIMIT 1", (gid_val,))
+                                if not fb_heat.empty:
+                                    fb_hid = int(fb_heat.iloc[0]["id"])
+                                    fb_df = qdf("""SELECT hr.*, p.name, p.start_number FROM heat_results hr
+                                                   JOIN participants p ON p.id=hr.participant_id
+                                                   WHERE hr.heat_id=? ORDER BY hr.place""", (fb_hid,))
+                                    if not fb_df.empty:
+                                        results = fb_df.to_dict("records")
                         if results:
                             tdata = [{"М": r["place"], ent: r["name"],
                                       "Время": format_time(r.get("time_seconds")),
@@ -1618,6 +1631,12 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                                       "Расчётное": format_time(r.get("projected_time"))} for r in results]
                             df_heat = pd.DataFrame(tdata)
                             current_row = write_df(ws_stage, df_heat, current_row, advancing=sd.qualifiers)
+                        else:
+                            # Последний fallback — хотя бы список участников группы
+                            if not members.empty:
+                                tdata = [{"М": i + 1, ent: r["name"]} for i, (_, r) in enumerate(members.iterrows())]
+                                df_heat = pd.DataFrame(tdata)
+                                current_row = write_df(ws_stage, df_heat, current_row)
 
                     current_row += 2  # отступ между группами
 
