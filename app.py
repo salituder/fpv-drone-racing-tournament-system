@@ -1579,22 +1579,27 @@ with tabs[5]:
                     pname = m["name"]
                     ex = existing_map.get(pid, {})
 
-                    c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
-                    with c1:
+                    with st.container(border=True):
                         st.markdown(f"**{pname}**")
-                    with c2:
-                        ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                        tval = st.number_input("Время", min_value=0.0, max_value=999.0,
-                                               value=ex_time, step=0.1,
-                                               key=f"fn_t_{heat_no}_{pid}", format="%.2f")
-                    with c3:
-                        ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                        lval = st.number_input("Круги", min_value=0.0, max_value=99.0,
-                                               value=ex_laps, step=0.1,
-                                               key=f"fn_l_{heat_no}_{pid}", format="%.1f")
-                    with c4:
-                        ex_all = bool(ex.get("completed_all_laps", 0))
-                        aval = st.checkbox("Все", value=ex_all, key=f"fn_a_{heat_no}_{pid}")
+                        c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+                        with c1:
+                            ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                   value=ex_time, step=0.001,
+                                                   key=f"fn_t_{heat_no}_{pid}", format="%.3f")
+                        with c2:
+                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                   value=ex_laps, step=0.1,
+                                                   key=f"fn_l_{heat_no}_{pid}", format="%.1f")
+                        with c3:
+                            ex_all = bool(ex.get("completed_all_laps", 0))
+                            aval = st.checkbox("Все круги", value=ex_all, key=f"fn_a_{heat_no}_{pid}",
+                                               help="Отметьте, если пилот прошёл все круги за отведённое время")
+                        with c4:
+                            if tval > 0 and lval > 0:
+                                proj = tval if aval else calc_projected_time(tval, lval, total_laps)
+                                st.metric("Расчётное", format_time(proj))
 
                     if tval > 0:
                         results_to_save.append({
