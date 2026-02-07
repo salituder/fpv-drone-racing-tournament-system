@@ -255,6 +255,15 @@ I18N = {
         "champion": "🏆 ЧЕМПИОН",
         "bonus_note": "Бонус +1 за 2 и более побед в вылетах",
 
+        # Симулятор
+        "scoring_mode": "Режим подсчёта очков",
+        "scoring_mode_hint": "Определяет как подсчитываются очки в групповом и финальном этапах",
+        "track": "Трасса",
+        "track_n": "Трасса {}",
+        "attempt_n": "Попытка {}",
+        "sim_qual_info": "Введите результаты каждого пилота. Лимит 2 минуты, 3 круга.",
+        "sim_group_results": "Сводка группы",
+
         # Общее
         "saved": "✅ Сохранено!",
         "error": "Ошибка",
@@ -346,6 +355,14 @@ I18N = {
         "champion": "🏆 CHAMPION",
         "bonus_note": "Bonus +1 for 2+ first-place finishes",
 
+        "scoring_mode": "Scoring mode",
+        "scoring_mode_hint": "Determines how points are calculated in group and final stages",
+        "track": "Track",
+        "track_n": "Track {}",
+        "attempt_n": "Attempt {}",
+        "sim_qual_info": "Enter results for each pilot. 2 minute limit, 3 laps.",
+        "sim_group_results": "Group summary",
+
         "saved": "✅ Saved!",
         "error": "Error",
         "download_csv": "📥 Download CSV",
@@ -408,8 +425,38 @@ PROGRESS_1_2_TO_FINAL: Dict[int, List[Tuple[int, int]]] = {
     1: [(1, 1), (1, 2), (2, 1), (2, 2)]
 }
 
-# Очки финала
+# Очки финала (дроны)
 FINAL_SCORING = {1: 3, 2: 2, 3: 1, 4: 0}
+
+# Очки группового/финального этапа (симулятор)
+SIM_SCORING = {1: 4, 2: 3, 3: 2, 4: 1}  # 0 для DNF (не в словаре)
+
+# Режимы подсчёта для симулятора
+SCORING_MODES = {
+    "sum_all": {
+        "RU": "Сумма всех вылетов (6 вылетов, макс. 24 оч.)",
+        "EN": "Sum of all heats (6 heats, max 24 pts)",
+        "RU_desc": "Все 4 пилота летят одновременно в каждом из 6 вылетов (2 трассы × 3 попытки). "
+                   "За каждый вылет начисляются очки: 1м=4, 2м=3, 3м=2, 4м=1, DNF=0. "
+                   "Итого суммируются очки за все 6 вылетов. Максимум: 24 очка.",
+    },
+    "best_time_per_track": {
+        "RU": "Лучшее время на трассе → очки (макс. 8 оч.)",
+        "EN": "Best time per track → points (max 8 pts)",
+        "RU_desc": "Каждый пилот делает 3 попытки на каждой трассе индивидуально. "
+                   "Засчитывается лучшее время из 3 попыток на каждой трассе. "
+                   "По лучшему времени — ранжирование и начисление очков (1м=4, 2м=3, 3м=2, 4м=1). "
+                   "Итого: очки за трассу 1 + очки за трассу 2. Максимум: 8 очков.",
+    },
+    "best_heat_per_track": {
+        "RU": "Лучший вылет на трассе → очки (макс. 8 оч.)",
+        "EN": "Best heat per track → points (max 8 pts)",
+        "RU_desc": "Все 4 пилота летят одновременно в каждом вылете. "
+                   "За каждый вылет начисляются очки (1м=4, 2м=3, 3м=2, 4м=1, DNF=0). "
+                   "На каждой трассе засчитывается только лучший вылет из трёх. "
+                   "Итого: лучшие очки за трассу 1 + лучшие очки за трассу 2. Максимум: 8 очков.",
+    },
+}
 
 
 # ============================================================
@@ -486,6 +533,7 @@ def init_db():
         discipline TEXT NOT NULL DEFAULT 'drone_individual',
         time_limit_seconds REAL NOT NULL DEFAULT 90.0,
         total_laps INTEGER NOT NULL DEFAULT 3,
+        scoring_mode TEXT NOT NULL DEFAULT 'none',
         status TEXT NOT NULL DEFAULT 'setup',
         created_at TEXT NOT NULL
     )""")
@@ -545,7 +593,8 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         group_id INTEGER NOT NULL,
         heat_no INTEGER NOT NULL,
-        UNIQUE(group_id, heat_no),
+        track_no INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(group_id, track_no, heat_no),
         FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
     )""")
 
@@ -734,26 +783,35 @@ def get_all_groups(stage_id: int) -> Dict[int, pd.DataFrame]:
     return {int(g["group_no"]): get_group_members(stage_id, int(g["group_no"])) for _, g in groups.iterrows()}
 
 
-def save_heat(stage_id: int, group_no: int, heat_no: int, results: List[Dict], is_final: bool = False):
-    """Сохранить результаты вылета. results = [{pid, time_seconds, laps_completed, completed_all_laps}]"""
+def save_heat(stage_id: int, group_no: int, heat_no: int, results: List[Dict],
+              is_final: bool = False, track_no: int = 1, scoring: Optional[Dict] = None):
+    """Сохранить результаты вылета. results = [{pid, time_seconds, laps_completed, completed_all_laps}]
+    scoring: если передан, используется вместо FINAL_SCORING (например SIM_SCORING)."""
     group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?",
                         (stage_id, group_no)).iloc[0]["id"])
-    exec_sql("INSERT OR IGNORE INTO heats(group_id, heat_no) VALUES(?,?)", (group_id, heat_no))
-    heat_id = int(qdf("SELECT id FROM heats WHERE group_id=? AND heat_no=?",
-                       (group_id, heat_no)).iloc[0]["id"])
+    exec_sql("INSERT OR IGNORE INTO heats(group_id, heat_no, track_no) VALUES(?,?,?)",
+             (group_id, heat_no, track_no))
+    heat_id = int(qdf("SELECT id FROM heats WHERE group_id=? AND heat_no=? AND track_no=?",
+                       (group_id, heat_no, track_no)).iloc[0]["id"])
 
     # Ранжируем
     ranked = rank_results(results)
 
-    tournament = qdf("SELECT t.total_laps FROM stages s JOIN tournaments t ON t.id=s.tournament_id WHERE s.id=?",
+    tournament = qdf("SELECT t.total_laps, t.discipline FROM stages s JOIN tournaments t ON t.id=s.tournament_id WHERE s.id=?",
                       (stage_id,))
     total_laps = int(tournament.iloc[0]["total_laps"]) if not tournament.empty else 3
+    disc = tournament.iloc[0]["discipline"] if not tournament.empty else "drone_individual"
+
+    score_map = scoring if scoring is not None else (FINAL_SCORING if is_final else None)
 
     rows = []
     for r in ranked:
-        projected = calc_projected_time(r["time_seconds"], r["laps_completed"], total_laps) \
-            if not r["completed_all_laps"] else r["time_seconds"]
-        pts = FINAL_SCORING.get(r["place"], 0) if is_final else 0
+        if disc == "sim_individual":
+            projected = None  # Нет расчётного времени для симулятора
+        else:
+            projected = calc_projected_time(r["time_seconds"], r["laps_completed"], total_laps) \
+                if not r["completed_all_laps"] else r["time_seconds"]
+        pts = score_map.get(r["place"], 0) if score_map else 0
         rows.append((heat_id, r["pid"], r["time_seconds"], r["laps_completed"],
                       int(r["completed_all_laps"]), projected, r["place"], pts))
 
@@ -762,12 +820,13 @@ def save_heat(stage_id: int, group_no: int, heat_no: int, results: List[Dict], i
                  completed_all_laps, projected_time, place, points) VALUES(?,?,?,?,?,?,?,?)""", rows)
 
 
-def get_heat_results(stage_id: int, group_no: int, heat_no: int) -> List[Dict]:
+def get_heat_results(stage_id: int, group_no: int, heat_no: int, track_no: int = 1) -> List[Dict]:
     gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id, group_no))
     if gid_df.empty:
         return []
     group_id = int(gid_df.iloc[0]["id"])
-    heat_df = qdf("SELECT id FROM heats WHERE group_id=? AND heat_no=?", (group_id, heat_no))
+    heat_df = qdf("SELECT id FROM heats WHERE group_id=? AND heat_no=? AND track_no=?",
+                   (group_id, heat_no, track_no))
     if heat_df.empty:
         return []
     heat_id = int(heat_df.iloc[0]["id"])
@@ -777,8 +836,11 @@ def get_heat_results(stage_id: int, group_no: int, heat_no: int) -> List[Dict]:
     return df.to_dict("records") if not df.empty else []
 
 
-def compute_group_ranking(stage_id: int, group_no: int) -> pd.DataFrame:
-    """Ранжирование в группе по результату одного вылета (для плей-офф)."""
+def compute_group_ranking(stage_id: int, group_no: int, discipline: str = "drone_individual",
+                          scoring_mode: str = "none") -> pd.DataFrame:
+    """Ранжирование в группе: для дронов — один вылет, для сима — агрегация."""
+    if discipline == "sim_individual":
+        return compute_sim_group_ranking(stage_id, group_no, scoring_mode)
     results = get_heat_results(stage_id, group_no, 1)
     if not results:
         return pd.DataFrame()
@@ -857,26 +919,140 @@ def detect_final_ties(standings: pd.DataFrame) -> List[List[int]]:
     return tied_groups
 
 
-def check_stage_results_complete(stage_id: int, stage_def: StageDef) -> Tuple[bool, str]:
+def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str) -> pd.DataFrame:
+    """Ранжирование в группе для симулятора (2 трассы × 3 попытки).
+    scoring_mode: 'sum_all', 'best_time_per_track', 'best_heat_per_track'."""
+    gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id, group_no))
+    if gid_df.empty:
+        return pd.DataFrame()
+    group_id = int(gid_df.iloc[0]["id"])
+
+    members = get_group_members(stage_id, group_no)
+    if members.empty:
+        return pd.DataFrame()
+
+    if scoring_mode == "sum_all":
+        # Вариант A: сумма очков за все 6 вылетов
+        df = qdf("""
+            SELECT hr.participant_id, p.name, p.start_number,
+                   COALESCE(SUM(hr.points), 0) as total_points,
+                   COUNT(hr.heat_id) as heats_played
+            FROM heat_results hr
+            JOIN heats h ON h.id=hr.heat_id
+            JOIN participants p ON p.id=hr.participant_id
+            WHERE h.group_id=?
+            GROUP BY hr.participant_id
+        """, (group_id,))
+        if df.empty:
+            return pd.DataFrame()
+        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
+        df["rank"] = range(1, len(df) + 1)
+        return df
+
+    elif scoring_mode == "best_time_per_track":
+        # Вариант B: лучшее время на каждой трассе → ранжирование → очки
+        rows = []
+        for _, m in members.iterrows():
+            pid = int(m["pid"])
+            total_pts = 0
+            for track in [1, 2]:
+                best_time = qdf("""
+                    SELECT MIN(hr.time_seconds) as best
+                    FROM heat_results hr
+                    JOIN heats h ON h.id=hr.heat_id
+                    WHERE h.group_id=? AND h.track_no=? AND hr.participant_id=?
+                          AND hr.time_seconds > 0
+                """, (group_id, track, pid))
+                bt = float(best_time.iloc[0]["best"]) if not best_time.empty and best_time.iloc[0]["best"] is not None else 9999.0
+                rows.append({"pid": pid, "name": m["name"], "start_number": m["start_number"],
+                             "track": track, "best_time": bt})
+
+        if not rows:
+            return pd.DataFrame()
+        rdf = pd.DataFrame(rows)
+        # Для каждой трассы ранжируем по времени и присваиваем очки
+        pts_by_pid = {}
+        for track in [1, 2]:
+            tdf = rdf[rdf["track"] == track].sort_values("best_time").reset_index(drop=True)
+            for i, row in tdf.iterrows():
+                pid = int(row["pid"])
+                place = i + 1
+                pts = SIM_SCORING.get(place, 0)
+                pts_by_pid[pid] = pts_by_pid.get(pid, 0) + pts
+
+        result = []
+        for _, m in members.iterrows():
+            pid = int(m["pid"])
+            result.append({"participant_id": pid, "name": m["name"], "start_number": m["start_number"],
+                           "total_points": pts_by_pid.get(pid, 0)})
+        df = pd.DataFrame(result)
+        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
+        df["rank"] = range(1, len(df) + 1)
+        return df
+
+    elif scoring_mode == "best_heat_per_track":
+        # Вариант C: лучшие очки из одного вылета на каждой трассе
+        rows = []
+        for _, m in members.iterrows():
+            pid = int(m["pid"])
+            total_pts = 0
+            for track in [1, 2]:
+                best_pts = qdf("""
+                    SELECT MAX(hr.points) as best
+                    FROM heat_results hr
+                    JOIN heats h ON h.id=hr.heat_id
+                    WHERE h.group_id=? AND h.track_no=? AND hr.participant_id=?
+                """, (group_id, track, pid))
+                bp = int(best_pts.iloc[0]["best"]) if not best_pts.empty and best_pts.iloc[0]["best"] is not None else 0
+                total_pts += bp
+            rows.append({"participant_id": pid, "name": m["name"], "start_number": m["start_number"],
+                         "total_points": total_pts})
+
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
+        df["rank"] = range(1, len(df) + 1)
+        return df
+
+    return pd.DataFrame()
+
+
+def compute_sim_final_standings(stage_id: int, scoring_mode: str) -> pd.DataFrame:
+    """Итоги финала симулятора: те же правила, что и групповой этап, но без бонусов."""
+    return compute_sim_group_ranking(stage_id, 1, scoring_mode)
+
+
+def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str = "drone_individual") -> Tuple[bool, str]:
     """Проверяет, все ли результаты заполнены для текущего этапа.
     Возвращает (ok, message)."""
     all_groups = get_all_groups(stage_id)
     if not all_groups:
         return False, "Нет групп в этом этапе"
 
-    heats_needed = stage_def.heats_count  # 1 для плей-офф, 3 для финала
     missing = []
     for gno, members in all_groups.items():
         if members.empty:
             missing.append(f"Группа {gno}: нет участников")
             continue
-        for h in range(1, heats_needed + 1):
-            results = get_heat_results(stage_id, gno, h)
-            if not results:
-                if heats_needed > 1:
-                    missing.append(f"Группа {gno}, вылет {h}: нет результатов")
-                else:
-                    missing.append(f"Группа {gno}: нет результатов")
+
+        if disc == "sim_individual":
+            # Для симулятора: 2 трассы × 3 попытки = 6 вылетов
+            for track in [1, 2]:
+                for attempt in [1, 2, 3]:
+                    results = get_heat_results(stage_id, gno, attempt, track)
+                    if not results:
+                        missing.append(f"Группа {gno}, Трасса {track}, Попытка {attempt}: нет результатов")
+        else:
+            # Для дронов: heats_count вылетов (1 для плей-офф, 3 для финала)
+            heats_needed = stage_def.heats_count
+            for h in range(1, heats_needed + 1):
+                results = get_heat_results(stage_id, gno, h)
+                if not results:
+                    if heats_needed > 1:
+                        missing.append(f"Группа {gno}, вылет {h}: нет результатов")
+                    else:
+                        missing.append(f"Группа {gno}: нет результатов")
     if missing:
         return False, "Не все результаты заполнены:\n" + "\n".join(missing)
     return True, ""
@@ -894,9 +1070,14 @@ def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
     if next_idx >= len(bracket):
         return
 
+    # Получаем дисциплину и scoring_mode
+    tourn_info = qdf("SELECT discipline, scoring_mode FROM tournaments WHERE id=?", (tournament_id,))
+    disc = str(tourn_info.iloc[0]["discipline"]) if not tourn_info.empty else "drone_individual"
+    sm = str(tourn_info.iloc[0]["scoring_mode"]) if not tourn_info.empty else "none"
+
     # Валидация: проверить, что все результаты текущего этапа заполнены
     cur_sd = bracket[cur_idx]
-    ok, msg = check_stage_results_complete(int(cur["id"]), cur_sd)
+    ok, msg = check_stage_results_complete(int(cur["id"]), cur_sd, disc)
     if not ok:
         raise ValueError(msg)
 
@@ -910,9 +1091,11 @@ def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
         rows = []
         for target_gno, refs in next_sd.progress_map.items():
             for (place, src_gno) in refs:
-                ranking = compute_group_ranking(int(cur["id"]), src_gno)
+                ranking = compute_group_ranking(int(cur["id"]), src_gno, disc, sm)
                 if not ranking.empty and len(ranking) >= place:
-                    pid = int(ranking.iloc[place - 1]["participant_id"])
+                    # pid column name can differ between drone and sim ranking DataFrames
+                    pid_col = "participant_id" if "participant_id" in ranking.columns else "pid"
+                    pid = int(ranking.iloc[place - 1][pid_col])
                     rows.append((gid_by_no[target_gno], pid))
 
         exec_many("INSERT OR IGNORE INTO group_members(group_id, participant_id) VALUES(?,?)", rows)
@@ -1110,13 +1293,38 @@ with st.sidebar:
         name = st.text_input(T("tournament_name"), value=f"Турнир {datetime.now().strftime('%d.%m.%Y')}")
         disc_key = st.selectbox(T("discipline"), list(DISCIPLINES.keys()),
                                 format_func=lambda k: DISCIPLINES[k])
-        time_limit = st.number_input(T("time_limit"), value=90.0, min_value=10.0, step=5.0)
-        total_laps = st.number_input(T("total_laps"), value=3, min_value=1, step=1)
+
+        # Условные дефолты в зависимости от дисциплины
+        if disc_key == "sim_individual":
+            default_time = 120.0
+            default_laps = 3
+        else:
+            default_time = 90.0
+            default_laps = 3
+
+        time_limit = st.number_input(T("time_limit"), value=default_time, min_value=10.0, step=5.0)
+        total_laps = st.number_input(T("total_laps"), value=default_laps, min_value=1, step=1)
+
+        # Режим подсчёта для симулятора
+        scoring_mode_val = "none"
+        if disc_key == "sim_individual":
+            st.markdown(f"**{T('scoring_mode')}**")
+            sm_options = list(SCORING_MODES.keys())
+            sm_labels = {k: SCORING_MODES[k].get(lang, SCORING_MODES[k]["RU"]) for k in sm_options}
+            scoring_mode_val = st.selectbox(
+                T("scoring_mode_hint"),
+                sm_options,
+                format_func=lambda k: sm_labels[k],
+                key="create_scoring_mode"
+            )
+            # Подробное описание
+            desc_key = "RU_desc" if lang == "RU" else "RU_desc"
+            st.caption(SCORING_MODES[scoring_mode_val].get(desc_key, ""))
 
         if st.button(T("create_tournament"), type="primary"):
-            exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, status, created_at)
-                        VALUES(?,?,?,?,?,?)""",
-                     (name, disc_key, time_limit, int(total_laps), "setup",
+            exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode, status, created_at)
+                        VALUES(?,?,?,?,?,?,?)""",
+                     (name, disc_key, time_limit, int(total_laps), scoring_mode_val, "setup",
                       datetime.now().isoformat(timespec="seconds")))
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
             st.session_state["selected_tournament"] = new_id
@@ -1136,15 +1344,20 @@ discipline = str(tourn["discipline"])
 t_status = str(tourn["status"])
 time_limit = float(tourn["time_limit_seconds"])
 total_laps = int(tourn["total_laps"])
+scoring_mode = str(tourn.get("scoring_mode", "none"))
 p_count = participant_count(tournament_id)
+is_sim = discipline == "sim_individual"
 
 with st.sidebar:
     st.caption(f"📋 {DISCIPLINES.get(discipline, discipline)}")
     st.caption(f"⏱️ {time_limit}с / {total_laps} кр.")
+    if is_sim and scoring_mode != "none":
+        sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode)
+        st.caption(f"📊 {sm_label}")
     st.caption(f"👥 {p_count} участников")
 
 # Проверка дисциплины
-if discipline != "drone_individual":
+if discipline not in ("drone_individual", "sim_individual"):
     st.header(T("app_title"))
     st.warning(T("coming_soon"))
     st.stop()
@@ -1360,15 +1573,20 @@ with tabs[2]:
         if not ranking.empty:
             advancing = compute_bracket_size(len(ranking))
             st.info(T("qual_cutoff").format(advancing, len(ranking)))
-            display = ranking[["place", "name", "start_number", "time_seconds",
-                               "laps_completed", "completed_all_laps", "projected_time"]].copy()
-            display.columns = [T("place"), T("pilot"), "№", T("time_seconds"),
-                               T("laps_completed"), T("completed_all"), T("projected_time")]
+            if is_sim:
+                display = ranking[["place", "name", "start_number", "time_seconds",
+                                   "laps_completed"]].copy()
+                display.columns = [T("place"), T("pilot"), "№", T("time_seconds"), T("laps_completed")]
+            else:
+                display = ranking[["place", "name", "start_number", "time_seconds",
+                                   "laps_completed", "completed_all_laps", "projected_time"]].copy()
+                display.columns = [T("place"), T("pilot"), "№", T("time_seconds"),
+                                   T("laps_completed"), T("completed_all"), T("projected_time")]
             styled = style_qual_table(display, advancing)
             st.dataframe(styled, use_container_width=True, hide_index=True)
             st.caption("🟢 Зелёный = проходит | 🔴 Красный = не проходит")
     else:
-        st.info(T("qual_info"))
+        st.info(T("sim_qual_info") if is_sim else T("qual_info"))
         st.caption(f"⏱️ Лимит: {time_limit} сек | 🔄 Кругов: {total_laps}")
 
         all_participants = qdf("""
@@ -1391,33 +1609,57 @@ with tabs[2]:
                 name = row["name"]
 
                 with st.expander(f"**#{sn} {name}**" + (" ✅" if pd.notna(row["time_seconds"]) else " ⏳"), expanded=pd.isna(row["time_seconds"])):
-                    c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
-                    with c1:
-                        existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
-                        time_val = st.number_input(
-                            f"Время (сек)", min_value=0.0, max_value=999.0,
-                            value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
-                    with c2:
-                        existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
-                        laps_val = st.number_input(
-                            "Круги.Препятствия", min_value=0.0, max_value=99.0,
-                            value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
-                    with c3:
-                        existing_all = bool(int(row["completed_all_laps"])) if pd.notna(row["completed_all_laps"]) else False
-                        all_laps = st.checkbox("Все круги", value=existing_all, key=f"qa_{pid}",
-                                               help="Отметьте, если пилот прошёл все круги за отведённое время")
-                    with c4:
-                        if time_val > 0 and laps_val > 0:
-                            proj = time_val if all_laps else calc_projected_time(time_val, laps_val, total_laps)
-                            st.metric("Расчётное", format_time(proj))
+                    if is_sim:
+                        # Симулятор: только время и круги, без расчётного
+                        c1, c2 = st.columns([2, 2])
+                        with c1:
+                            existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
+                            time_val = st.number_input(
+                                f"Время (сек)", min_value=0.0, max_value=999.0,
+                                value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
+                        with c2:
+                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
+                            laps_val = st.number_input(
+                                "Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
+                        all_laps = laps_val >= total_laps  # Авто-определяем
 
-                    if st.button("💾 Сохранить", key=f"qs_{pid}"):
-                        if time_val > 0:
-                            save_qual_result(tournament_id, pid, time_val, laps_val, all_laps, total_laps)
-                            st.success(T("saved"))
-                            st.rerun()
-                        else:
-                            st.error("Введите время!")
+                        if st.button("💾 Сохранить", key=f"qs_{pid}"):
+                            if time_val > 0:
+                                save_qual_result(tournament_id, pid, time_val, laps_val, all_laps, total_laps)
+                                st.success(T("saved"))
+                                st.rerun()
+                            else:
+                                st.error("Введите время!")
+                    else:
+                        # Дроны: полный набор полей
+                        c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+                        with c1:
+                            existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
+                            time_val = st.number_input(
+                                f"Время (сек)", min_value=0.0, max_value=999.0,
+                                value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
+                        with c2:
+                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
+                            laps_val = st.number_input(
+                                "Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
+                        with c3:
+                            existing_all = bool(int(row["completed_all_laps"])) if pd.notna(row["completed_all_laps"]) else False
+                            all_laps = st.checkbox("Все круги", value=existing_all, key=f"qa_{pid}",
+                                                   help="Отметьте, если пилот прошёл все круги за отведённое время")
+                        with c4:
+                            if time_val > 0 and laps_val > 0:
+                                proj = time_val if all_laps else calc_projected_time(time_val, laps_val, total_laps)
+                                st.metric("Расчётное", format_time(proj))
+
+                        if st.button("💾 Сохранить", key=f"qs_{pid}"):
+                            if time_val > 0:
+                                save_qual_result(tournament_id, pid, time_val, laps_val, all_laps, total_laps)
+                                st.success(T("saved"))
+                                st.rerun()
+                            else:
+                                st.error("Введите время!")
 
             # --- Таблица результатов ---
             st.divider()
@@ -1429,9 +1671,14 @@ with tabs[2]:
                 total_p = participant_count(tournament_id)
                 st.info(T("qual_cutoff").format(advancing, total_p))
 
-                display = ranking[["place", "name", "start_number", "time_seconds",
-                                   "laps_completed", "completed_all_laps", "projected_time"]].copy()
-                display.columns = ["Место", "Пилот", "№", "Время (сек)", "Круги", "Все 3", "Расчётное"]
+                if is_sim:
+                    display = ranking[["place", "name", "start_number", "time_seconds",
+                                       "laps_completed"]].copy()
+                    display.columns = ["Место", "Пилот", "№", "Время (сек)", "Круги"]
+                else:
+                    display = ranking[["place", "name", "start_number", "time_seconds",
+                                       "laps_completed", "completed_all_laps", "projected_time"]].copy()
+                    display.columns = ["Место", "Пилот", "№", "Время (сек)", "Круги", "Все 3", "Расчётное"]
                 styled = style_qual_table(display, advancing)
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption("🟢 Зелёный = проходит | 🔴 Красный = не проходит")
@@ -1546,24 +1793,55 @@ with tabs[3]:
 
             # --- Содержимое групп ---
             if sd.code == "F" and stage_id_br:
-                fin_standings = compute_final_standings(stage_id_br)
-                if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
-                    bracket_html += '<div class="bracket-group">'
-                    medals_html = {1: "🥇", 2: "🥈", 3: "🥉"}
-                    medal_class = {1: "gold", 2: "silver", 3: "bronze"}
-                    for _, fr in fin_standings.iterrows():
-                        rank = int(fr["rank"])
-                        cls = medal_class.get(rank, "")
-                        medal = medals_html.get(rank, f"{rank}.")
-                        bonus = " +1б" if int(fr["bonus"]) > 0 else ""
-                        bracket_html += f'<div class="bracket-player {cls}">'
-                        bracket_html += f'<span>{medal} {fr["name"]}</span>'
-                        bracket_html += f'<span><b>{int(fr["total"])} оч.</b> ({int(fr["wins"])} поб.{bonus})</span>'
+                if is_sim:
+                    # Финал симулятора
+                    sim_fin = compute_sim_final_standings(stage_id_br, scoring_mode)
+                    if not sim_fin.empty and int(sim_fin.iloc[0].get("total_points", 0)) > 0:
+                        bracket_html += '<div class="bracket-group">'
+                        medals_html = {1: "🥇", 2: "🥈", 3: "🥉"}
+                        medal_class = {1: "gold", 2: "silver", 3: "bronze"}
+                        for _, fr in sim_fin.iterrows():
+                            rank = int(fr["rank"])
+                            cls = medal_class.get(rank, "")
+                            medal = medals_html.get(rank, f"{rank}.")
+                            bracket_html += f'<div class="bracket-player {cls}">'
+                            bracket_html += f'<span>{medal} {fr["name"]}</span>'
+                            bracket_html += f'<span><b>{int(fr["total_points"])} оч.</b></span>'
+                            bracket_html += '</div>'
                         bracket_html += '</div>'
-                    bracket_html += '</div>'
+                    else:
+                        bracket_html += '<div class="bracket-group">'
+                        if stage_id_br:
+                            members_f = get_group_members(stage_id_br, 1)
+                            if not members_f.empty:
+                                for _, r in members_f.iterrows():
+                                    bracket_html += f'<div class="bracket-player pending-player"><span>{r["name"]}</span><span>—</span></div>'
+                            else:
+                                for i in range(sd.group_size):
+                                    bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
+                        else:
+                            for i in range(sd.group_size):
+                                bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
+                        bracket_html += '</div>'
                 else:
-                    bracket_html += '<div class="bracket-group">'
-                    if stage_id_br:
+                    # Финал дронов
+                    fin_standings = compute_final_standings(stage_id_br)
+                    if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
+                        bracket_html += '<div class="bracket-group">'
+                        medals_html = {1: "🥇", 2: "🥈", 3: "🥉"}
+                        medal_class = {1: "gold", 2: "silver", 3: "bronze"}
+                        for _, fr in fin_standings.iterrows():
+                            rank = int(fr["rank"])
+                            cls = medal_class.get(rank, "")
+                            medal = medals_html.get(rank, f"{rank}.")
+                            bonus = " +1б" if int(fr["bonus"]) > 0 else ""
+                            bracket_html += f'<div class="bracket-player {cls}">'
+                            bracket_html += f'<span>{medal} {fr["name"]}</span>'
+                            bracket_html += f'<span><b>{int(fr["total"])} оч.</b> ({int(fr["wins"])} поб.{bonus})</span>'
+                            bracket_html += '</div>'
+                        bracket_html += '</div>'
+                    else:
+                        bracket_html += '<div class="bracket-group">'
                         members_f = get_group_members(stage_id_br, 1)
                         if not members_f.empty:
                             for _, r in members_f.iterrows():
@@ -1571,29 +1849,42 @@ with tabs[3]:
                         else:
                             for i in range(sd.group_size):
                                 bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
-                    else:
-                        for i in range(sd.group_size):
-                            bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
-                    bracket_html += '</div>'
+                        bracket_html += '</div>'
             elif stage_id_br:
                 all_groups_br = get_all_groups(stage_id_br)
                 for gno in sorted(all_groups_br.keys()):
                     members = all_groups_br[gno]
                     bracket_html += f'<div class="bracket-group">'
                     bracket_html += f'<div class="bracket-group-title">Гр. {gno}</div>'
-                    results = get_heat_results(stage_id_br, gno, 1)
-                    if results:
-                        for r in results:
-                            place = r["place"]
-                            cls = "advancing" if place <= sd.qualifiers else "eliminated"
-                            time_str = format_time(r.get("time_seconds"))
-                            bracket_html += f'<div class="bracket-player {cls}">'
-                            bracket_html += f'<span>{place}. {r["name"]}</span>'
-                            bracket_html += f'<span>{time_str}</span>'
-                            bracket_html += '</div>'
-                    elif not members.empty:
-                        for i, (_, r) in enumerate(members.iterrows()):
-                            bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. {r["name"]}</span><span>—</span></div>'
+                    if is_sim:
+                        # Для симулятора: показываем очки из агрегации
+                        sim_rank = compute_sim_group_ranking(stage_id_br, gno, scoring_mode)
+                        if not sim_rank.empty and int(sim_rank["total_points"].sum()) > 0:
+                            for _, sr in sim_rank.iterrows():
+                                rank = int(sr["rank"])
+                                cls = "advancing" if rank <= sd.qualifiers else "eliminated"
+                                bracket_html += f'<div class="bracket-player {cls}">'
+                                bracket_html += f'<span>{rank}. {sr["name"]}</span>'
+                                bracket_html += f'<span>{int(sr["total_points"])} оч.</span>'
+                                bracket_html += '</div>'
+                        elif not members.empty:
+                            for i, (_, r) in enumerate(members.iterrows()):
+                                bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. {r["name"]}</span><span>—</span></div>'
+                    else:
+                        # Для дронов: один вылет, показываем время
+                        results = get_heat_results(stage_id_br, gno, 1)
+                        if results:
+                            for r in results:
+                                place = r["place"]
+                                cls = "advancing" if place <= sd.qualifiers else "eliminated"
+                                time_str = format_time(r.get("time_seconds"))
+                                bracket_html += f'<div class="bracket-player {cls}">'
+                                bracket_html += f'<span>{place}. {r["name"]}</span>'
+                                bracket_html += f'<span>{time_str}</span>'
+                                bracket_html += '</div>'
+                        elif not members.empty:
+                            for i, (_, r) in enumerate(members.iterrows()):
+                                bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. {r["name"]}</span><span>—</span></div>'
                     bracket_html += '</div>'
             else:
                 for gno in range(1, sd.group_count + 1):
@@ -1639,21 +1930,39 @@ with tabs[3]:
                 elif bracket[cur_idx].code == "F":
                     # Финал завершён?
                     final_sd = bracket[cur_idx]
-                    final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd)
+                    final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd, discipline)
                     if final_ok:
-                        fin_standings = compute_final_standings(int(active["id"]))
-                        fin_ties = detect_final_ties(fin_standings) if not fin_standings.empty else []
-                        if fin_ties:
-                            st.divider()
-                            st.warning("⚠️ В финале есть ничья — перейдите на вкладку 'Финал' для проведения доп. вылета.")
+                        if is_sim:
+                            sim_fin = compute_sim_final_standings(int(active["id"]), scoring_mode)
+                            has_ties = False
+                            if not sim_fin.empty:
+                                pts = sim_fin["total_points"].tolist()
+                                has_ties = len(pts) != len(set(pts))
+                            if has_ties:
+                                st.divider()
+                                st.warning("⚠️ В финале есть ничья — перейдите на вкладку 'Финал' для проведения доп. вылета.")
+                            else:
+                                st.divider()
+                                if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
+                                    exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
+                                    exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
+                                    st.success("🏆 Турнир завершён!")
+                                    st.balloons()
+                                    st.rerun()
                         else:
-                            st.divider()
-                            if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
-                                exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
-                                exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
-                                st.success("🏆 Турнир завершён!")
-                                st.balloons()
-                                st.rerun()
+                            fin_standings = compute_final_standings(int(active["id"]))
+                            fin_ties = detect_final_ties(fin_standings) if not fin_standings.empty else []
+                            if fin_ties:
+                                st.divider()
+                                st.warning("⚠️ В финале есть ничья — перейдите на вкладку 'Финал' для проведения доп. вылета.")
+                            else:
+                                st.divider()
+                                if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
+                                    exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
+                                    exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
+                                    st.success("🏆 Турнир завершён!")
+                                    st.balloons()
+                                    st.rerun()
 
 
 # ============================================================
@@ -1681,7 +1990,109 @@ with tabs[4]:
             # Если это финал — направляем на вкладку Финал
             if sd.code == "F":
                 st.info("🏆 Сейчас идёт ФИНАЛ — вводите результаты на вкладке 'Финал'")
+            elif is_sim:
+                # ========== СИМУЛЯТОР: 2 трассы × 3 попытки ==========
+                st.success(f"🔥 Сейчас: **{sname}**")
+                sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode) if scoring_mode != "none" else ""
+                if sm_label:
+                    st.caption(f"📊 Режим подсчёта: {sm_label}")
+
+                all_groups = get_all_groups(stage_id)
+
+                col_sel1, col_sel2, col_sel3 = st.columns([2, 2, 2])
+                with col_sel1:
+                    group_options = list(all_groups.keys())
+                    group_no = st.selectbox(T("select_group"), group_options,
+                                            format_func=lambda x: f"{T('group')} {x}", key="po_group") if group_options else None
+                with col_sel2:
+                    track_no = st.selectbox(T("track"), [1, 2],
+                                            format_func=lambda x: T("track_n").format(x), key="po_track")
+                with col_sel3:
+                    attempt_no = st.selectbox("Попытка", [1, 2, 3],
+                                              format_func=lambda x: T("attempt_n").format(x), key="po_attempt")
+
+                if group_no and group_no in all_groups:
+                    members = all_groups[group_no]
+                    existing = get_heat_results(stage_id, group_no, attempt_no, track_no)
+                    existing_map = {r["participant_id"]: r for r in existing}
+
+                    st.divider()
+                    st.markdown(f"### {T('group')} {group_no} — {T('track_n').format(track_no)}, {T('attempt_n').format(attempt_no)}")
+                    st.caption(f"⏱️ Лимит: {time_limit} сек | 4 пилота")
+
+                    results_to_save = []
+                    for _, m in members.iterrows():
+                        pid = int(m["pid"])
+                        pname = m["name"]
+                        ex = existing_map.get(pid, {})
+
+                        with st.container(border=True):
+                            st.markdown(f"**{pname}**")
+                            c1, c2 = st.columns([2, 2])
+                            with c1:
+                                ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                       value=ex_time, step=0.001,
+                                                       key=f"po_t_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
+                            with c2:
+                                ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                       value=ex_laps, step=0.1,
+                                                       key=f"po_l_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.1f")
+
+                            if tval > 0:
+                                results_to_save.append({
+                                    "pid": pid, "time_seconds": tval,
+                                    "laps_completed": lval, "completed_all_laps": lval >= total_laps
+                                })
+
+                    st.divider()
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="po_save"):
+                            if len(results_to_save) == len(members):
+                                save_heat(stage_id, group_no, attempt_no, results_to_save,
+                                          is_final=False, track_no=track_no, scoring=SIM_SCORING)
+                                st.success(T("saved"))
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error("Введите результаты для всех пилотов!")
+
+                    # Таблица текущего вылета
+                    results = get_heat_results(stage_id, group_no, attempt_no, track_no)
+                    if results:
+                        st.markdown(f"### 📊 Результаты: {T('track_n').format(track_no)}, {T('attempt_n').format(attempt_no)}")
+                        tdata = [{"М": r["place"], "Пилот": r["name"],
+                                  "Время": format_time(r.get("time_seconds")),
+                                  "Круги": r.get("laps_completed", "—"),
+                                  "Очки": int(r.get("points", 0))} for r in results]
+                        df_r = pd.DataFrame(tdata)
+                        styled = style_standings_table(df_r, sd.qualifiers)
+                        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                    # Сводная таблица группы
+                    st.divider()
+                    st.markdown(f"### {T('sim_group_results')}: {T('group')} {group_no}")
+                    sim_ranking = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
+                    if not sim_ranking.empty:
+                        sim_disp = sim_ranking[["rank", "name", "total_points"]].copy()
+                        sim_disp.columns = ["М", "Пилот", "Очки"]
+                        styled_sim = style_standings_table(sim_disp, sd.qualifiers)
+                        st.dataframe(styled_sim, use_container_width=True, hide_index=True)
+                        st.caption("🟢 Проходит (топ-2) | 🔴 Выбывает")
+
+                    # Прогресс заполнения
+                    st.divider()
+                    st.markdown("**Прогресс заполнения:**")
+                    for tr in [1, 2]:
+                        for att in [1, 2, 3]:
+                            res = get_heat_results(stage_id, group_no, att, tr)
+                            icon = "✅" if res else "⏳"
+                            st.caption(f"{icon} {T('track_n').format(tr)}, {T('attempt_n').format(att)}")
+
             else:
+                # ========== ДРОНЫ: один вылет ==========
                 st.success(f"🔥 Сейчас: **{sname}**")
 
                 all_groups = get_all_groups(stage_id)
@@ -1794,7 +2205,221 @@ with tabs[5]:
 
         if members.empty:
             st.warning("Финалисты не определены")
+        elif is_sim:
+            # ============================================================
+            # ФИНАЛ ДЛЯ СИМУЛЯТОРА: 2 трассы × 3 попытки
+            # ============================================================
+            if is_finished:
+                st.success("🏆 **ТУРНИР ЗАВЕРШЁН!**")
+            else:
+                st.success(f"🏆 Финалисты: {', '.join(members['name'].tolist())}")
+
+            sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode)
+            st.caption(f"📊 Режим подсчёта: {sm_label}")
+
+            # Ввод результатов по трасса/попытка
+            if not is_finished:
+                st.markdown("### Ввод результатов финала")
+                col_sel1, col_sel2 = st.columns([2, 2])
+                with col_sel1:
+                    fn_track = st.selectbox(T("track"), [1, 2],
+                                            format_func=lambda x: T("track_n").format(x), key="fn_track")
+                with col_sel2:
+                    fn_attempt = st.selectbox("Попытка", [1, 2, 3],
+                                              format_func=lambda x: T("attempt_n").format(x), key="fn_attempt")
+
+                existing = get_heat_results(stage_id, 1, fn_attempt, fn_track)
+                existing_map = {r["participant_id"]: r for r in existing}
+
+                st.divider()
+                st.markdown(f"### {T('track_n').format(fn_track)}, {T('attempt_n').format(fn_attempt)}")
+                st.caption(f"⏱️ Лимит: {time_limit} сек | 4 пилота")
+
+                results_to_save = []
+                for _, m in members.iterrows():
+                    pid = int(m["pid"])
+                    pname = m["name"]
+                    ex = existing_map.get(pid, {})
+
+                    with st.container(border=True):
+                        st.markdown(f"**{pname}**")
+                        c1, c2 = st.columns([2, 2])
+                        with c1:
+                            ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                   value=ex_time, step=0.001,
+                                                   key=f"fn_t_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
+                        with c2:
+                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                   value=ex_laps, step=0.1,
+                                                   key=f"fn_l_{fn_track}_{fn_attempt}_{pid}", format="%.1f")
+
+                    if tval > 0:
+                        results_to_save.append({
+                            "pid": pid, "time_seconds": tval,
+                            "laps_completed": lval, "completed_all_laps": lval >= total_laps
+                        })
+
+                if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="fn_save"):
+                    if len(results_to_save) == len(members):
+                        save_heat(stage_id, 1, fn_attempt, results_to_save,
+                                  is_final=False, track_no=fn_track, scoring=SIM_SCORING)
+                        st.success(T("saved"))
+                        st.rerun()
+                    else:
+                        st.error("Введите результаты для всех!")
+
+                # Результаты текущего вылета
+                results = get_heat_results(stage_id, 1, fn_attempt, fn_track)
+                if results:
+                    tdata = [{"М": r["place"], "Пилот": r["name"],
+                              "Время": format_time(r.get("time_seconds")),
+                              "Круги": r.get("laps_completed", "—"),
+                              "Очки": int(r.get("points", 0))} for r in results]
+                    st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
+
+            # Прогресс заполнения
+            st.divider()
+            st.markdown("**Прогресс заполнения финала:**")
+            all_filled = True
+            for tr in [1, 2]:
+                for att in [1, 2, 3]:
+                    res = get_heat_results(stage_id, 1, att, tr)
+                    icon = "✅" if res else "⏳"
+                    if not res:
+                        all_filled = False
+                    st.caption(f"{icon} {T('track_n').format(tr)}, {T('attempt_n').format(att)}")
+
+            # Итоговая таблица
+            st.divider()
+            st.markdown(f"### 🏆 {T('final_standings')}")
+
+            sim_standings = compute_sim_final_standings(stage_id, scoring_mode)
+            if not sim_standings.empty:
+                medal_data = []
+                for _, row in sim_standings.iterrows():
+                    rank = int(row["rank"])
+                    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+                    medal_data.append({
+                        "М": rank,
+                        "": medals.get(rank, ""),
+                        "Пилот": row["name"],
+                        "Очки": int(row["total_points"]),
+                    })
+                df_final = pd.DataFrame(medal_data)
+                styled_final = style_final_podium(df_final)
+                st.dataframe(styled_final, use_container_width=True, hide_index=True)
+
+                if is_finished:
+                    champion = sim_standings.iloc[0]["name"]
+                    st.success(f"🏆 **ЧЕМПИОН: {champion}!** {T('champion')}")
+                else:
+                    # Проверяем ничьи
+                    if all_filled:
+                        # Detect ties for sim
+                        pts_col = "total_points"
+                        pts_vals = sim_standings[pts_col].tolist()
+                        sim_tied_groups = []
+                        seen = set()
+                        for i, p in enumerate(pts_vals):
+                            if i in seen:
+                                continue
+                            group = [sim_standings.iloc[i]["participant_id"] if "participant_id" in sim_standings.columns
+                                     else sim_standings.iloc[i].get("pid", i)]
+                            for j in range(i + 1, len(pts_vals)):
+                                if pts_vals[j] == p:
+                                    pid_j = sim_standings.iloc[j]["participant_id"] if "participant_id" in sim_standings.columns \
+                                        else sim_standings.iloc[j].get("pid", j)
+                                    group.append(pid_j)
+                                    seen.add(j)
+                            if len(group) > 1:
+                                sim_tied_groups.append([int(x) for x in group])
+
+                        if sim_tied_groups:
+                            st.divider()
+                            st.error("⚠️ **Обнаружена ничья!** Необходим дополнительный вылет для определения мест.")
+
+                            for tg in sim_tied_groups:
+                                pid_col = "participant_id" if "participant_id" in sim_standings.columns else "pid"
+                                tied_names = sim_standings[sim_standings[pid_col].isin(tg)]["name"].tolist()
+                                tied_pts = int(sim_standings[sim_standings[pid_col].isin(tg)].iloc[0]["total_points"])
+                                st.warning(f"🤝 Ничья ({tied_pts} оч.): **{', '.join(tied_names)}**")
+
+                            # Тайбрейк: дополнительный вылет
+                            all_tied_pids = []
+                            for tg in sim_tied_groups:
+                                all_tied_pids.extend(tg)
+
+                            group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1",
+                                               (stage_id,)).iloc[0]["id"])
+                            max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=? AND track_no=1",
+                                              (group_id,))
+                            max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 3
+                            next_tb = max_heat + 1
+
+                            st.markdown(f"### 🔄 Дополнительный вылет #{next_tb - 3}")
+                            st.caption("Участвуют пилоты с одинаковыми очками. Результат определит места.")
+
+                            existing_tb = get_heat_results(stage_id, 1, next_tb, track_no=1)
+                            existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+
+                            tb_results = []
+                            pid_col = "participant_id" if "participant_id" in sim_standings.columns else "pid"
+                            for tpid in all_tied_pids:
+                                prow = sim_standings[sim_standings[pid_col] == tpid].iloc[0]
+                                pname = prow["name"]
+                                ex = existing_tb_map.get(tpid, {})
+
+                                with st.container(border=True):
+                                    st.markdown(f"**{pname}**")
+                                    c1, c2 = st.columns([2, 2])
+                                    with c1:
+                                        ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                        tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                               value=ex_time, step=0.001,
+                                                               key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
+                                    with c2:
+                                        ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                        lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                               value=ex_laps, step=0.1,
+                                                               key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
+
+                                if tval > 0:
+                                    tb_results.append({
+                                        "pid": tpid, "time_seconds": tval,
+                                        "laps_completed": lval, "completed_all_laps": lval >= total_laps
+                                    })
+
+                            if st.button(f"💾 Сохранить доп. вылет #{next_tb - 3}", type="primary",
+                                         use_container_width=True, key=f"tb_save_{next_tb}"):
+                                if len(tb_results) == len(all_tied_pids):
+                                    save_heat(stage_id, 1, next_tb, tb_results,
+                                              is_final=False, track_no=1, scoring=SIM_SCORING)
+                                    st.success("Сохранено! Проверьте итоговую таблицу.")
+                                    st.rerun()
+                                else:
+                                    st.error("Введите результаты для всех участников тайбрейка!")
+
+                        else:
+                            # Нет ничьих — можно завершить
+                            st.divider()
+                            if st.button("🏆 Завершить турнир", type="primary", use_container_width=True,
+                                         key="finish_tournament"):
+                                exec_sql("UPDATE stages SET status='done' WHERE id=?", (stage_id,))
+                                exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
+                                st.success("🏆 Турнир завершён!")
+                                st.balloons()
+                                st.rerun()
+                    else:
+                        st.info("Заполните все 6 вылетов (2 трассы × 3 попытки) для определения итогов")
+            else:
+                st.info("Введите результаты финала")
+
         else:
+            # ============================================================
+            # ФИНАЛ ДЛЯ ДРОНОВ: 3 вылета + бонус
+            # ============================================================
             if is_finished:
                 st.success("🏆 **ТУРНИР ЗАВЕРШЁН!**")
             else:
@@ -1810,7 +2435,6 @@ with tabs[5]:
                 existing_map = {r["participant_id"]: r for r in existing}
 
                 if is_finished:
-                    # Только чтение — показываем таблицу результатов
                     if existing:
                         tdata = [{"М": r["place"], "Пилот": r["name"],
                                   "Время": format_time(r["time_seconds"]),
@@ -1821,7 +2445,6 @@ with tabs[5]:
                     else:
                         st.caption("Нет результатов")
                 else:
-                    # Редактирование
                     results_to_save = []
                     for _, m in members.iterrows():
                         pid = int(m["pid"])
@@ -1864,7 +2487,6 @@ with tabs[5]:
                         else:
                             st.error("Введите результаты для всех!")
 
-                    # Показываем результаты вылета
                     results = get_heat_results(stage_id, 1, heat_no)
                     if results:
                         tdata = [{"М": r["place"], "Пилот": r["name"],
@@ -1878,7 +2500,6 @@ with tabs[5]:
 
             standings = compute_final_standings(stage_id)
             if not standings.empty:
-                # Итоговая таблица с медалями
                 medal_data = []
                 for _, row in standings.iterrows():
                     rank = int(row["rank"])
@@ -1898,20 +2519,16 @@ with tabs[5]:
                 st.dataframe(styled_final, use_container_width=True, hide_index=True)
 
                 if is_finished:
-                    # Турнир завершён — просто показываем чемпиона
                     champion = standings.iloc[0]["name"]
                     st.success(f"🏆 **ЧЕМПИОН: {champion}!** {T('champion')}")
                 else:
-                    # Проверяем ничьи
                     tied_groups = detect_final_ties(standings)
                     has_basic_3 = int(standings.iloc[0].get("heats_played", 0)) >= 3
 
                     if has_basic_3 and tied_groups:
-                        # Есть неразрешённые ничьи — нужен тайбрейк
                         st.divider()
                         st.error("⚠️ **Обнаружена ничья!** Необходим дополнительный вылет для определения мест.")
 
-                        # Определяем номер следующего тайбрейка
                         group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1",
                                            (stage_id,)).iloc[0]["id"])
                         max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?", (group_id,))
