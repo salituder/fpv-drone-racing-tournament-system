@@ -582,6 +582,13 @@ def init_db():
         FOREIGN KEY(participant_id) REFERENCES participants(id) ON DELETE CASCADE
     )""")
 
+    c.execute("""CREATE TABLE IF NOT EXISTS team_pilots(
+        participant_id INTEGER PRIMARY KEY,
+        pilot1_name TEXT NOT NULL,
+        pilot2_name TEXT NOT NULL,
+        FOREIGN KEY(participant_id) REFERENCES participants(id) ON DELETE CASCADE
+    )""")
+
     # === Миграции: добавить столбцы, если их нет (для обновления старых БД) ===
     try:
         c.execute("ALTER TABLE tournaments ADD COLUMN scoring_mode TEXT NOT NULL DEFAULT 'none'")
@@ -816,7 +823,7 @@ def save_heat(stage_id: int, group_no: int, heat_no: int, results: List[Dict],
 
     rows = []
     for r in ranked:
-        if disc == "sim_individual":
+        if disc in ("sim_individual", "sim_team"):
             projected = None  # Нет расчётного времени для симулятора
         else:
             projected = calc_projected_time(r["time_seconds"], r["laps_completed"], total_laps) \
@@ -849,7 +856,7 @@ def get_heat_results(stage_id: int, group_no: int, heat_no: int, track_no: int =
 def compute_group_ranking(stage_id: int, group_no: int, discipline: str = "drone_individual",
                           scoring_mode: str = "none") -> pd.DataFrame:
     """Ранжирование в группе: для дронов — один вылет, для сима — агрегация + тайбрейк."""
-    if discipline == "sim_individual":
+    if discipline in ("sim_individual", "sim_team"):
         return resolve_sim_tiebreaker(stage_id, group_no, scoring_mode)
     results = get_heat_results(stage_id, group_no, 1)
     if not results:
@@ -1061,7 +1068,7 @@ def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str =
             missing.append(f"Группа {gno}: нет участников")
             continue
 
-        if disc == "sim_individual":
+        if disc in ("sim_individual", "sim_team"):
             # Для симулятора: 2 трассы × 3 попытки = 6 вылетов
             for track in [1, 2]:
                 for attempt in [1, 2, 3]:
@@ -1387,7 +1394,7 @@ with st.sidebar:
                                 format_func=lambda k: DISCIPLINES[k])
 
         # Условные дефолты в зависимости от дисциплины
-        if disc_key == "sim_individual":
+        if disc_key in ("sim_individual", "sim_team"):
             default_time = 120.0
             default_laps = 3
         else:
@@ -1398,10 +1405,12 @@ with st.sidebar:
         total_laps = st.number_input(T("total_laps"), value=default_laps, min_value=1, step=1)
 
         # Для симулятора — автоматически sum_all
-        scoring_mode_val = "sum_all" if disc_key == "sim_individual" else "none"
-        if disc_key == "sim_individual":
+        scoring_mode_val = "sum_all" if disc_key in ("sim_individual", "sim_team") else "none"
+        if disc_key in ("sim_individual", "sim_team"):
             st.caption("📊 Подсчёт: сумма очков за 6 вылетов (2 трассы × 3 попытки). "
                        "Очки: 1м=4, 2м=3, 3м=2, 4м=1, DNF=0. Макс 24 очка.")
+        if disc_key == "sim_team":
+            st.caption("👥 Командный зачёт: 2 пилота в команде. Время за попытку суммируется.")
 
         if st.button(T("create_tournament"), type="primary"):
             exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode, status, created_at)
@@ -1428,20 +1437,20 @@ time_limit = float(tourn["time_limit_seconds"])
 total_laps = int(tourn["total_laps"])
 scoring_mode = str(tourn.get("scoring_mode", "none"))
 p_count = participant_count(tournament_id)
-is_sim = discipline == "sim_individual"
+is_sim = discipline in ("sim_individual", "sim_team")
+is_team = discipline == "sim_team"
 
 with st.sidebar:
     st.caption(f"📋 {DISCIPLINES.get(discipline, discipline)}")
     st.caption(f"⏱️ {time_limit}с / {total_laps} кр.")
     if is_sim:
         st.caption("📊 Сумма очков за 6 вылетов")
-    st.caption(f"👥 {p_count} участников")
+    if is_team:
+        st.caption(f"👥 {p_count} команд")
+    else:
+        st.caption(f"👥 {p_count} участников")
 
-# Проверка дисциплины
-if discipline not in ("drone_individual", "sim_individual"):
-    st.header(T("app_title"))
-    st.warning(T("coming_soon"))
-    st.stop()
+# Все три дисциплины поддерживаются
 
 st.header(T("app_title"))
 
@@ -1462,7 +1471,7 @@ with tabs[0]:
     st.subheader(T("overview_title"))
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric(T("total_participants"), p_count)
+        st.metric("Команд" if is_team else T("total_participants"), p_count)
     with c2:
         status_labels = {"setup": T("status_setup"), "qualification": T("status_qualification"),
                          "bracket": T("status_bracket"), "finished": T("status_finished")}
@@ -1500,18 +1509,36 @@ with tabs[1]:
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.markdown(f"### {T('add_participant')}")
+        st.markdown(f"### {'Добавить команду' if is_team else T('add_participant')}")
         if t_status in ("bracket", "finished"):
             st.info("🔒 Добавление участников недоступно — турнир уже продвинулся дальше квалификации.")
         else:
-            with st.form("add_pilot", clear_on_submit=True):
-                pname = st.text_input(T("pilot_name"))
-                if st.form_submit_button(T("add"), type="primary"):
-                    if pname.strip():
-                        exec_sql("INSERT INTO participants(tournament_id, name) VALUES(?,?)",
-                                 (tournament_id, pname.strip()))
-                        st.success(T("saved"))
-                        st.rerun()
+            if is_team:
+                with st.form("add_team", clear_on_submit=True):
+                    team_name = st.text_input("Название команды")
+                    pilot1 = st.text_input("Пилот 1")
+                    pilot2 = st.text_input("Пилот 2")
+                    if st.form_submit_button(T("add"), type="primary"):
+                        if team_name.strip() and pilot1.strip() and pilot2.strip():
+                            exec_sql("INSERT INTO participants(tournament_id, name) VALUES(?,?)",
+                                     (tournament_id, team_name.strip()))
+                            new_pid = int(qdf("SELECT id FROM participants WHERE tournament_id=? ORDER BY id DESC LIMIT 1",
+                                              (tournament_id,)).iloc[0]["id"])
+                            exec_sql("INSERT INTO team_pilots(participant_id, pilot1_name, pilot2_name) VALUES(?,?,?)",
+                                     (new_pid, pilot1.strip(), pilot2.strip()))
+                            st.success(T("saved"))
+                            st.rerun()
+                        else:
+                            st.warning("Заполните все три поля: название команды и имена обоих пилотов.")
+            else:
+                with st.form("add_pilot", clear_on_submit=True):
+                    pname = st.text_input(T("pilot_name"))
+                    if st.form_submit_button(T("add"), type="primary"):
+                        if pname.strip():
+                            exec_sql("INSERT INTO participants(tournament_id, name) VALUES(?,?)",
+                                     (tournament_id, pname.strip()))
+                            st.success(T("saved"))
+                            st.rerun()
 
         st.divider()
         st.markdown(f"### {T('random_draw')}")
@@ -1526,7 +1553,7 @@ with tabs[1]:
             if st.button(T("random_draw"), type="primary"):
                 pdf = qdf("SELECT id FROM participants WHERE tournament_id=?", (tournament_id,))
                 if pdf.empty:
-                    st.warning("Нет участников")
+                    st.warning("Нет команд" if is_team else "Нет участников")
                 else:
                     ids = pdf["id"].tolist()
                     random.shuffle(ids)
@@ -1572,13 +1599,22 @@ with tabs[1]:
         with st.expander("🛠️ Инструменты разработчика", expanded=False):
             st.caption(T("demo_hint"))
             n_demo = st.number_input(T("demo_count"), min_value=4, max_value=64, value=16, step=1)
-            prefix = st.text_input(T("demo_prefix"), value="Пилот")
+            prefix = st.text_input(T("demo_prefix"), value="Команда" if is_team else "Пилот")
             if st.button(T("demo_add")):
                 if participant_count(tournament_id) > 0:
                     st.warning(T("demo_already"))
                 else:
-                    rows = [(tournament_id, f"{prefix} {i}") for i in range(1, int(n_demo) + 1)]
-                    exec_many("INSERT INTO participants(tournament_id, name) VALUES(?,?)", rows)
+                    if is_team:
+                        for i in range(1, int(n_demo) + 1):
+                            exec_sql("INSERT INTO participants(tournament_id, name) VALUES(?,?)",
+                                     (tournament_id, f"{prefix} {i}"))
+                            new_pid = int(qdf("SELECT id FROM participants WHERE tournament_id=? ORDER BY id DESC LIMIT 1",
+                                              (tournament_id,)).iloc[0]["id"])
+                            exec_sql("INSERT INTO team_pilots(participant_id, pilot1_name, pilot2_name) VALUES(?,?,?)",
+                                     (new_pid, f"Пилот {i}A", f"Пилот {i}B"))
+                    else:
+                        rows = [(tournament_id, f"{prefix} {i}") for i in range(1, int(n_demo) + 1)]
+                        exec_many("INSERT INTO participants(tournament_id, name) VALUES(?,?)", rows)
                     st.success(f'{T("demo_added")}: {n_demo}')
                     st.rerun()
 
@@ -1587,25 +1623,37 @@ with tabs[1]:
                                   FROM participants WHERE tournament_id=?
                                   ORDER BY COALESCE(start_number, 9999), name""", (tournament_id,))
 
+        # Для командного зачёта загрузим данные пилотов
+        team_pilots_map = {}
+        if is_team and not participants_raw.empty:
+            tp_df = qdf("SELECT participant_id, pilot1_name, pilot2_name FROM team_pilots WHERE participant_id IN ({})".format(
+                ",".join(str(int(x)) for x in participants_raw["id"].tolist())))
+            for _, tpr in tp_df.iterrows():
+                team_pilots_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
+
         if participants_raw.empty:
-            st.info("Пока нет участников. Добавьте слева.")
+            st.info("Пока нет участников. Добавьте слева." if not is_team else "Пока нет команд. Добавьте слева.")
         else:
-            st.markdown(f"**Всего: {len(participants_raw)} участников**")
+            count_label = f"**Всего: {len(participants_raw)} {'команд' if is_team else 'участников'}**"
+            st.markdown(count_label)
 
             for _, row in participants_raw.iterrows():
                 pid = int(row["id"])
                 pname = row["name"]
                 sn = f"#{int(row['start_number'])}" if pd.notna(row["start_number"]) else ""
+                pilots = team_pilots_map.get(pid, None)
 
                 locked = t_status in ("bracket", "finished")
                 with st.container(border=True):
-                    c1, c2, c3 = st.columns([1, 5, 2]) if not locked else [st.empty(), st.empty(), st.empty()]
                     if locked:
                         c1, c2 = st.columns([1, 5])
                         with c1:
                             st.markdown(f"**{sn}**" if sn else "—")
                         with c2:
-                            st.markdown(pname)
+                            if is_team and pilots:
+                                st.markdown(f"{pname} ({pilots[0]}, {pilots[1]})")
+                            else:
+                                st.markdown(pname)
                     else:
                         c1, c2, c3 = st.columns([1, 5, 2])
                         with c1:
@@ -1614,12 +1662,28 @@ with tabs[1]:
                             # Inline edit
                             edit_key = f"edit_mode_{pid}"
                             if st.session_state.get(edit_key, False):
-                                new_name = st.text_input("Имя", value=pname, key=f"edit_name_{pid}", label_visibility="collapsed")
+                                if is_team:
+                                    new_name = st.text_input("Команда", value=pname, key=f"edit_name_{pid}")
+                                    p1_val = pilots[0] if pilots else ""
+                                    p2_val = pilots[1] if pilots else ""
+                                    new_p1 = st.text_input("Пилот 1", value=p1_val, key=f"edit_p1_{pid}")
+                                    new_p2 = st.text_input("Пилот 2", value=p2_val, key=f"edit_p2_{pid}")
+                                else:
+                                    new_name = st.text_input("Имя", value=pname, key=f"edit_name_{pid}", label_visibility="collapsed")
                                 ec1, ec2 = st.columns(2)
                                 with ec1:
                                     if st.button("✅", key=f"save_edit_{pid}", use_container_width=True):
                                         if new_name.strip():
                                             exec_sql("UPDATE participants SET name=? WHERE id=?", (new_name.strip(), pid))
+                                        if is_team:
+                                            p1_save = new_p1.strip() if new_p1.strip() else p1_val
+                                            p2_save = new_p2.strip() if new_p2.strip() else p2_val
+                                            if pilots:
+                                                exec_sql("UPDATE team_pilots SET pilot1_name=?, pilot2_name=? WHERE participant_id=?",
+                                                         (p1_save, p2_save, pid))
+                                            else:
+                                                exec_sql("INSERT INTO team_pilots(participant_id, pilot1_name, pilot2_name) VALUES(?,?,?)",
+                                                         (pid, p1_save, p2_save))
                                         st.session_state[edit_key] = False
                                         st.rerun()
                                 with ec2:
@@ -1627,7 +1691,10 @@ with tabs[1]:
                                         st.session_state[edit_key] = False
                                         st.rerun()
                             else:
-                                st.markdown(pname)
+                                if is_team and pilots:
+                                    st.markdown(f"{pname} ({pilots[0]}, {pilots[1]})")
+                                else:
+                                    st.markdown(pname)
                         with c3:
                             bc1, bc2 = st.columns(2)
                             with bc1:
@@ -1636,6 +1703,7 @@ with tabs[1]:
                                     st.rerun()
                             with bc2:
                                 if st.button("🗑️", key=f"btn_del_{pid}", use_container_width=True):
+                                    exec_sql("DELETE FROM team_pilots WHERE participant_id=?", (pid,))
                                     exec_sql("DELETE FROM participants WHERE id=?", (pid,))
                                     exec_sql("DELETE FROM qualification_results WHERE participant_id=?", (pid,))
                                     st.rerun()
@@ -1654,20 +1722,26 @@ with tabs[2]:
         if not ranking.empty:
             advancing = compute_bracket_size(len(ranking))
             st.info(T("qual_cutoff").format(advancing, len(ranking)))
+            pilot_label = "Команда" if is_team else T("pilot")
             if is_sim:
                 display = ranking[["place", "name", "start_number", "time_seconds",
                                    "laps_completed"]].copy()
-                display.columns = [T("place"), T("pilot"), "№", T("time_seconds"), T("laps_completed")]
+                display.columns = [T("place"), pilot_label, "№", T("time_seconds"), T("laps_completed")]
             else:
                 display = ranking[["place", "name", "start_number", "time_seconds",
                                    "laps_completed", "completed_all_laps", "projected_time"]].copy()
-                display.columns = [T("place"), T("pilot"), "№", T("time_seconds"),
+                display.columns = [T("place"), pilot_label, "№", T("time_seconds"),
                                    T("laps_completed"), T("completed_all"), T("projected_time")]
             styled = style_qual_table(display, advancing)
             st.dataframe(styled, use_container_width=True, hide_index=True)
             st.caption("🟢 Зелёный = проходит | 🔴 Красный = не проходит")
     else:
-        st.info(T("sim_qual_info") if is_sim else T("qual_info"))
+        if is_team:
+            st.info("Введите результаты каждой команды (время каждого пилота суммируется). Лимит 2 минуты, 3 круга.")
+        elif is_sim:
+            st.info(T("sim_qual_info"))
+        else:
+            st.info(T("qual_info"))
         st.caption(f"⏱️ Лимит: {time_limit} сек | 🔄 Кругов: {total_laps}")
 
         all_participants = qdf("""
@@ -1684,14 +1758,65 @@ with tabs[2]:
         else:
             st.markdown("### Ввод результатов")
 
+            # Для командного зачёта загружаем пилотов
+            qual_team_map = {}
+            if is_team:
+                all_pids = [int(r["pid"]) for _, r in all_participants.iterrows()]
+                if all_pids:
+                    tp_q = qdf("SELECT participant_id, pilot1_name, pilot2_name FROM team_pilots WHERE participant_id IN ({})".format(
+                        ",".join(str(x) for x in all_pids)))
+                    for _, tpr in tp_q.iterrows():
+                        qual_team_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
+
             for _, row in all_participants.iterrows():
                 pid = int(row["pid"])
                 sn = int(row["start_number"])
                 name = row["name"]
+                q_pilots = qual_team_map.get(pid, None) if is_team else None
 
-                with st.expander(f"**#{sn} {name}**" + (" ✅" if pd.notna(row["time_seconds"]) else " ⏳"), expanded=pd.isna(row["time_seconds"])):
-                    if is_sim:
-                        # Симулятор: только время и круги, без расчётного
+                expander_label = f"**#{sn} {name}**"
+                if is_team and q_pilots:
+                    expander_label += f" ({q_pilots[0]}, {q_pilots[1]})"
+                expander_label += " ✅" if pd.notna(row["time_seconds"]) else " ⏳"
+
+                with st.expander(expander_label, expanded=pd.isna(row["time_seconds"])):
+                    if is_team:
+                        # Командный зачёт: два времени пилотов, автосумма
+                        existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
+                        p1_label = q_pilots[0] if q_pilots else "Пилот 1"
+                        p2_label = q_pilots[1] if q_pilots else "Пилот 2"
+                        c1, c2, c3 = st.columns([2, 2, 2])
+                        with c1:
+                            t1_val = st.number_input(
+                                f"⏱️ {p1_label} (сек)", min_value=0.0, max_value=999.0,
+                                value=existing_time / 2 if existing_time > 0 else 0.0,
+                                step=0.001, key=f"qt1_{pid}", format="%.3f")
+                        with c2:
+                            t2_val = st.number_input(
+                                f"⏱️ {p2_label} (сек)", min_value=0.0, max_value=999.0,
+                                value=existing_time / 2 if existing_time > 0 else 0.0,
+                                step=0.001, key=f"qt2_{pid}", format="%.3f")
+                        with c3:
+                            sum_time = t1_val + t2_val
+                            st.metric("Сумма (сек)", f"{sum_time:.3f}")
+
+                        laps_col1, _ = st.columns([2, 4])
+                        with laps_col1:
+                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
+                            laps_val = st.number_input(
+                                "Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
+                        all_laps = laps_val >= total_laps
+
+                        if st.button("💾 Сохранить", key=f"qs_{pid}"):
+                            if sum_time > 0:
+                                save_qual_result(tournament_id, pid, sum_time, laps_val, all_laps, total_laps)
+                                st.success(T("saved"))
+                                st.rerun()
+                            else:
+                                st.error("Введите время обоих пилотов!")
+                    elif is_sim:
+                        # Симулятор личный: только время и круги, без расчётного
                         c1, c2 = st.columns([2, 2])
                         with c1:
                             existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
@@ -1752,14 +1877,15 @@ with tabs[2]:
                 total_p = participant_count(tournament_id)
                 st.info(T("qual_cutoff").format(advancing, total_p))
 
+                pilot_col_name = "Команда" if is_team else "Пилот"
                 if is_sim:
                     display = ranking[["place", "name", "start_number", "time_seconds",
                                        "laps_completed"]].copy()
-                    display.columns = ["Место", "Пилот", "№", "Время (сек)", "Круги"]
+                    display.columns = ["Место", pilot_col_name, "№", "Время (сек)", "Круги"]
                 else:
                     display = ranking[["place", "name", "start_number", "time_seconds",
                                        "laps_completed", "completed_all_laps", "projected_time"]].copy()
-                    display.columns = ["Место", "Пилот", "№", "Время (сек)", "Круги", "Все 3", "Расчётное"]
+                    display.columns = ["Место", pilot_col_name, "№", "Время (сек)", "Круги", "Все 3", "Расчётное"]
                 styled = style_qual_table(display, advancing)
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption("🟢 Зелёный = проходит | 🔴 Красный = не проходит")
@@ -2145,34 +2271,77 @@ with tabs[4]:
                     attempt_no = st.selectbox("Попытка", [1, 2, 3],
                                               format_func=lambda x: T("attempt_n").format(x), key="po_attempt")
 
+                # Для команд загружаем пилотов
+                po_team_map = {}
+                if is_team:
+                    all_po_pids = []
+                    for gno, gdf in all_groups.items():
+                        all_po_pids.extend([int(x) for x in gdf["pid"].tolist()])
+                    if all_po_pids:
+                        tp_po = qdf("SELECT participant_id, pilot1_name, pilot2_name FROM team_pilots WHERE participant_id IN ({})".format(
+                            ",".join(str(x) for x in all_po_pids)))
+                        for _, tpr in tp_po.iterrows():
+                            po_team_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
+
                 if group_no and group_no in all_groups:
                     members = all_groups[group_no]
                     existing = get_heat_results(stage_id, group_no, attempt_no, track_no)
                     existing_map = {r["participant_id"]: r for r in existing}
 
                     st.divider()
+                    entity_label = "команды" if is_team else "пилота"
                     st.markdown(f"### {T('group')} {group_no} — {T('track_n').format(track_no)}, {T('attempt_n').format(attempt_no)}")
-                    st.caption(f"⏱️ Лимит: {time_limit} сек | 4 пилота")
+                    st.caption(f"⏱️ Лимит: {time_limit} сек | 4 {entity_label}")
 
                     results_to_save = []
                     for _, m in members.iterrows():
                         pid = int(m["pid"])
                         pname = m["name"]
                         ex = existing_map.get(pid, {})
+                        po_pilots = po_team_map.get(pid, None) if is_team else None
 
                         with st.container(border=True):
-                            st.markdown(f"**{pname}**")
-                            c1, c2 = st.columns([2, 2])
-                            with c1:
+                            if is_team and po_pilots:
+                                st.markdown(f"**{pname}** ({po_pilots[0]}, {po_pilots[1]})")
+                            else:
+                                st.markdown(f"**{pname}**")
+
+                            if is_team:
+                                # Командный: два времени + автосумма
+                                p1_lbl = po_pilots[0] if po_pilots else "Пилот 1"
+                                p2_lbl = po_pilots[1] if po_pilots else "Пилот 2"
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                                tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                       value=ex_time, step=0.001,
-                                                       key=f"po_t_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
-                            with c2:
-                                ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                                       value=ex_laps, step=0.1,
-                                                       key=f"po_l_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.1f")
+                                tc1, tc2, tc3 = st.columns([2, 2, 2])
+                                with tc1:
+                                    t1v = st.number_input(f"⏱️ {p1_lbl}", min_value=0.0, max_value=999.0,
+                                                          value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                          key=f"po_t1_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
+                                with tc2:
+                                    t2v = st.number_input(f"⏱️ {p2_lbl}", min_value=0.0, max_value=999.0,
+                                                          value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                          key=f"po_t2_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
+                                with tc3:
+                                    tval = t1v + t2v
+                                    st.metric("Сумма", f"{tval:.3f}")
+
+                                lc1, _ = st.columns([2, 4])
+                                with lc1:
+                                    ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                    lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                           value=ex_laps, step=0.1,
+                                                           key=f"po_l_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.1f")
+                            else:
+                                c1, c2 = st.columns([2, 2])
+                                with c1:
+                                    ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                    tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                           value=ex_time, step=0.001,
+                                                           key=f"po_t_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
+                                with c2:
+                                    ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                    lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                           value=ex_laps, step=0.1,
+                                                           key=f"po_l_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.1f")
 
                             if tval > 0:
                                 results_to_save.append({
@@ -2191,13 +2360,14 @@ with tabs[4]:
                                 st.balloons()
                                 st.rerun()
                             else:
-                                st.error("Введите результаты для всех пилотов!")
+                                st.error("Введите результаты для всех участников!" if is_team else "Введите результаты для всех пилотов!")
 
                     # Таблица текущего вылета
                     results = get_heat_results(stage_id, group_no, attempt_no, track_no)
                     if results:
+                        entity_col = "Команда" if is_team else "Пилот"
                         st.markdown(f"### 📊 Результаты: {T('track_n').format(track_no)}, {T('attempt_n').format(attempt_no)}")
-                        tdata = [{"М": r["place"], "Пилот": r["name"],
+                        tdata = [{"М": r["place"], entity_col: r["name"],
                                   "Время": format_time(r.get("time_seconds")),
                                   "Круги": r.get("laps_completed", "—"),
                                   "Очки": int(r.get("points", 0))} for r in results]
@@ -2207,6 +2377,7 @@ with tabs[4]:
 
                     # Сводная таблица группы
                     st.divider()
+                    entity_col2 = "Команда" if is_team else "Пилот"
                     st.markdown(f"### {T('sim_group_results')}: {T('group')} {group_no}")
                     sim_ranking = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
                     if not sim_ranking.empty:
@@ -2219,7 +2390,7 @@ with tabs[4]:
                             t1 = format_time(tb.get("t1")) if tb.get("t1") else "—"
                             t2 = format_time(tb.get("t2")) if tb.get("t2") else "—"
                             sim_rows.append({
-                                "М": int(sr["rank"]), "Пилот": sr["name"],
+                                "М": int(sr["rank"]), entity_col2: sr["name"],
                                 "Трасса 1": t1, "Трасса 2": t2,
                                 "Очки": int(sr["total_points"]),
                             })
@@ -2260,7 +2431,8 @@ with tabs[4]:
                                 all_tied_pids.extend(tg)
 
                             st.markdown("### 🔄 Дополнительный вылет")
-                            st.caption("Участвуют пилоты с одинаковыми очками. Результат определит кто проходит дальше.")
+                            tb_entity = "команды" if is_team else "пилоты"
+                            st.caption(f"Участвуют {tb_entity} с одинаковыми очками. Результат определит кто проходит дальше.")
 
                             # track_no=99 — специальный маркер тайбрейка
                             existing_tb = get_heat_results(stage_id, group_no, 1, track_no=99)
@@ -2274,20 +2446,48 @@ with tabs[4]:
                                     continue
                                 pname = prow.iloc[0]["name"]
                                 ex = existing_tb_map.get(tpid, {})
+                                tb_pilots = po_team_map.get(tpid, None) if is_team else None
 
                                 with st.container(border=True):
-                                    st.markdown(f"**{pname}**")
-                                    c1, c2 = st.columns([2, 2])
-                                    with c1:
+                                    if is_team and tb_pilots:
+                                        st.markdown(f"**{pname}** ({tb_pilots[0]}, {tb_pilots[1]})")
+                                    else:
+                                        st.markdown(f"**{pname}**")
+
+                                    if is_team:
+                                        p1l = tb_pilots[0] if tb_pilots else "Пилот 1"
+                                        p2l = tb_pilots[1] if tb_pilots else "Пилот 2"
                                         ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                                        tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                               value=ex_time, step=0.001,
-                                                               key=f"tb_t_{group_no}_{tpid}", format="%.3f")
-                                    with c2:
-                                        ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                                        lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                                               value=ex_laps, step=0.1,
-                                                               key=f"tb_l_{group_no}_{tpid}", format="%.1f")
+                                        tbc1, tbc2, tbc3 = st.columns([2, 2, 2])
+                                        with tbc1:
+                                            tb1v = st.number_input(f"⏱️ {p1l}", min_value=0.0, max_value=999.0,
+                                                                   value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                   key=f"tb_t1_{group_no}_{tpid}", format="%.3f")
+                                        with tbc2:
+                                            tb2v = st.number_input(f"⏱️ {p2l}", min_value=0.0, max_value=999.0,
+                                                                   value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                   key=f"tb_t2_{group_no}_{tpid}", format="%.3f")
+                                        with tbc3:
+                                            tval = tb1v + tb2v
+                                            st.metric("Сумма", f"{tval:.3f}")
+                                        tblc1, _ = st.columns([2, 4])
+                                        with tblc1:
+                                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                                   value=ex_laps, step=0.1,
+                                                                   key=f"tb_l_{group_no}_{tpid}", format="%.1f")
+                                    else:
+                                        c1, c2 = st.columns([2, 2])
+                                        with c1:
+                                            ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                                   value=ex_time, step=0.001,
+                                                                   key=f"tb_t_{group_no}_{tpid}", format="%.3f")
+                                        with c2:
+                                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                                   value=ex_laps, step=0.1,
+                                                                   key=f"tb_l_{group_no}_{tpid}", format="%.1f")
 
                                 if tval > 0:
                                     tb_results.append({
@@ -2306,8 +2506,9 @@ with tabs[4]:
                                     st.error("Введите результаты для всех участников тайбрейка!")
 
                             if existing_tb:
+                                ent_tb = "Команда" if is_team else "Пилот"
                                 st.markdown("**Результаты доп. вылета:**")
-                                tdata = [{"М": r["place"], "Пилот": r["name"],
+                                tdata = [{"М": r["place"], ent_tb: r["name"],
                                           "Время": format_time(r.get("time_seconds")),
                                           "Круги": r.get("laps_completed", "—")} for r in existing_tb]
                                 st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
@@ -2325,7 +2526,7 @@ with tabs[4]:
                                         t1 = format_time(tbr.get("t1")) if tbr.get("t1") else "—"
                                         t2 = format_time(tbr.get("t2")) if tbr.get("t2") else "—"
                                         rr_rows.append({
-                                            "М": int(sr["rank"]), "Пилот": sr["name"],
+                                            "М": int(sr["rank"]), ent_tb: sr["name"],
                                             "Трасса 1": t1, "Трасса 2": t2,
                                             "Очки": int(sr["total_points"]),
                                         })
@@ -2458,6 +2659,16 @@ with tabs[5]:
 
             st.caption("📊 Сумма очков за 6 вылетов (2 трассы × 3 попытки, макс. 24 оч.)")
 
+            # Для команд загружаем пилотов
+            fn_team_map = {}
+            if is_team:
+                fn_pids = [int(x) for x in members["pid"].tolist()]
+                if fn_pids:
+                    tp_fn = qdf("SELECT participant_id, pilot1_name, pilot2_name FROM team_pilots WHERE participant_id IN ({})".format(
+                        ",".join(str(x) for x in fn_pids)))
+                    for _, tpr in tp_fn.iterrows():
+                        fn_team_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
+
             # Ввод результатов по трасса/попытка
             if not is_finished:
                 st.markdown("### Ввод результатов финала")
@@ -2473,28 +2684,57 @@ with tabs[5]:
                 existing_map = {r["participant_id"]: r for r in existing}
 
                 st.divider()
+                fn_entity = "команды" if is_team else "пилота"
                 st.markdown(f"### {T('track_n').format(fn_track)}, {T('attempt_n').format(fn_attempt)}")
-                st.caption(f"⏱️ Лимит: {time_limit} сек | 4 пилота")
+                st.caption(f"⏱️ Лимит: {time_limit} сек | 4 {fn_entity}")
 
                 results_to_save = []
                 for _, m in members.iterrows():
                     pid = int(m["pid"])
                     pname = m["name"]
                     ex = existing_map.get(pid, {})
+                    fn_pilots = fn_team_map.get(pid, None) if is_team else None
 
                     with st.container(border=True):
-                        st.markdown(f"**{pname}**")
-                        c1, c2 = st.columns([2, 2])
-                        with c1:
+                        if is_team and fn_pilots:
+                            st.markdown(f"**{pname}** ({fn_pilots[0]}, {fn_pilots[1]})")
+                        else:
+                            st.markdown(f"**{pname}**")
+
+                        if is_team:
+                            p1_lbl = fn_pilots[0] if fn_pilots else "Пилот 1"
+                            p2_lbl = fn_pilots[1] if fn_pilots else "Пилот 2"
                             ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                   value=ex_time, step=0.001,
-                                                   key=f"fn_t_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
-                        with c2:
-                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                                   value=ex_laps, step=0.1,
-                                                   key=f"fn_l_{fn_track}_{fn_attempt}_{pid}", format="%.1f")
+                            fc1, fc2, fc3 = st.columns([2, 2, 2])
+                            with fc1:
+                                ft1v = st.number_input(f"⏱️ {p1_lbl}", min_value=0.0, max_value=999.0,
+                                                       value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                       key=f"fn_t1_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
+                            with fc2:
+                                ft2v = st.number_input(f"⏱️ {p2_lbl}", min_value=0.0, max_value=999.0,
+                                                       value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                       key=f"fn_t2_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
+                            with fc3:
+                                tval = ft1v + ft2v
+                                st.metric("Сумма", f"{tval:.3f}")
+                            flc1, _ = st.columns([2, 4])
+                            with flc1:
+                                ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                       value=ex_laps, step=0.1,
+                                                       key=f"fn_l_{fn_track}_{fn_attempt}_{pid}", format="%.1f")
+                        else:
+                            c1, c2 = st.columns([2, 2])
+                            with c1:
+                                ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                       value=ex_time, step=0.001,
+                                                       key=f"fn_t_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
+                            with c2:
+                                ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                       value=ex_laps, step=0.1,
+                                                       key=f"fn_l_{fn_track}_{fn_attempt}_{pid}", format="%.1f")
 
                     if tval > 0:
                         results_to_save.append({
@@ -2512,9 +2752,10 @@ with tabs[5]:
                         st.error("Введите результаты для всех!")
 
                 # Результаты текущего вылета
+                fn_ent_col = "Команда" if is_team else "Пилот"
                 results = get_heat_results(stage_id, 1, fn_attempt, fn_track)
                 if results:
-                    tdata = [{"М": r["place"], "Пилот": r["name"],
+                    tdata = [{"М": r["place"], fn_ent_col: r["name"],
                               "Время": format_time(r.get("time_seconds")),
                               "Круги": r.get("laps_completed", "—"),
                               "Очки": int(r.get("points", 0))} for r in results]
@@ -2536,6 +2777,7 @@ with tabs[5]:
             st.divider()
             st.markdown(f"### 🏆 {T('final_standings')}")
 
+            fn_standings_col = "Команда" if is_team else "Пилот"
             sim_standings = compute_sim_final_standings(stage_id, scoring_mode)
             if not sim_standings.empty:
                 track_bests_fin = get_sim_track_bests(stage_id, 1)
@@ -2551,7 +2793,7 @@ with tabs[5]:
                     medal_data.append({
                         "М": rank,
                         "": medals.get(rank, ""),
-                        "Пилот": row["name"],
+                        fn_standings_col: row["name"],
                         "Трасса 1": t1,
                         "Трасса 2": t2,
                         "Очки": int(row["total_points"]),
@@ -2607,8 +2849,9 @@ with tabs[5]:
                             max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 3
                             next_tb = max_heat + 1
 
+                            fn_tb_entity = "команды" if is_team else "пилоты"
                             st.markdown(f"### 🔄 Дополнительный вылет #{next_tb - 3}")
-                            st.caption("Участвуют пилоты с одинаковыми очками. Результат определит места.")
+                            st.caption(f"Участвуют {fn_tb_entity} с одинаковыми очками. Результат определит места.")
 
                             existing_tb = get_heat_results(stage_id, 1, next_tb, track_no=1)
                             existing_tb_map = {r["participant_id"]: r for r in existing_tb}
@@ -2619,20 +2862,48 @@ with tabs[5]:
                                 prow = sim_standings[sim_standings[pid_col] == tpid].iloc[0]
                                 pname = prow["name"]
                                 ex = existing_tb_map.get(tpid, {})
+                                fn_tb_pilots = fn_team_map.get(tpid, None) if is_team else None
 
                                 with st.container(border=True):
-                                    st.markdown(f"**{pname}**")
-                                    c1, c2 = st.columns([2, 2])
-                                    with c1:
+                                    if is_team and fn_tb_pilots:
+                                        st.markdown(f"**{pname}** ({fn_tb_pilots[0]}, {fn_tb_pilots[1]})")
+                                    else:
+                                        st.markdown(f"**{pname}**")
+
+                                    if is_team:
+                                        p1l = fn_tb_pilots[0] if fn_tb_pilots else "Пилот 1"
+                                        p2l = fn_tb_pilots[1] if fn_tb_pilots else "Пилот 2"
                                         ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                                        tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                               value=ex_time, step=0.001,
-                                                               key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
-                                    with c2:
-                                        ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                                        lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                                               value=ex_laps, step=0.1,
-                                                               key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
+                                        fntbc1, fntbc2, fntbc3 = st.columns([2, 2, 2])
+                                        with fntbc1:
+                                            fntb1v = st.number_input(f"⏱️ {p1l}", min_value=0.0, max_value=999.0,
+                                                                     value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                     key=f"fn_tb_t1_{next_tb}_{tpid}", format="%.3f")
+                                        with fntbc2:
+                                            fntb2v = st.number_input(f"⏱️ {p2l}", min_value=0.0, max_value=999.0,
+                                                                     value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                     key=f"fn_tb_t2_{next_tb}_{tpid}", format="%.3f")
+                                        with fntbc3:
+                                            tval = fntb1v + fntb2v
+                                            st.metric("Сумма", f"{tval:.3f}")
+                                        fntblc, _ = st.columns([2, 4])
+                                        with fntblc:
+                                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                                   value=ex_laps, step=0.1,
+                                                                   key=f"fn_tb_l_{next_tb}_{tpid}", format="%.1f")
+                                    else:
+                                        c1, c2 = st.columns([2, 2])
+                                        with c1:
+                                            ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                                   value=ex_time, step=0.001,
+                                                                   key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
+                                        with c2:
+                                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                                   value=ex_laps, step=0.1,
+                                                                   key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
 
                                 if tval > 0:
                                     tb_results.append({
