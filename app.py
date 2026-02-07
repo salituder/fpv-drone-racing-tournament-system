@@ -1479,20 +1479,24 @@ with tabs[4]:
                         ex = existing_map.get(pid, {})
 
                         with st.container(border=True):
-                            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+                            st.markdown(f"**{pname}**")
+                            c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
                             with c1:
-                                st.markdown(f"**{pname}**")
-                            with c2:
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                 tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                       value=ex_time, step=0.1, key=f"po_t_{group_no}_{pid}", format="%.2f")
-                            with c3:
+                                                       value=ex_time, step=0.001, key=f"po_t_{group_no}_{pid}", format="%.3f")
+                            with c2:
                                 ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                                lval = st.number_input("Круги", min_value=0.0, max_value=99.0,
+                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
                                                        value=ex_laps, step=0.1, key=f"po_l_{group_no}_{pid}", format="%.1f")
-                            with c4:
+                            with c3:
                                 ex_all = bool(ex.get("completed_all_laps", 0))
-                                aval = st.checkbox("Все", value=ex_all, key=f"po_a_{group_no}_{pid}")
+                                aval = st.checkbox("Все круги", value=ex_all, key=f"po_a_{group_no}_{pid}",
+                                                   help="Отметьте, если пилот прошёл все круги за отведённое время")
+                            with c4:
+                                if tval > 0 and lval > 0:
+                                    proj = tval if aval else calc_projected_time(tval, lval, total_laps)
+                                    st.metric("Расчётное", format_time(proj))
 
                             if tval > 0:
                                 results_to_save.append({
@@ -1520,9 +1524,10 @@ with tabs[4]:
                         for r in results:
                             tdata.append({
                                 "М": r["place"], "Пилот": r["name"],
-                                "Время": format_time(r["time_seconds"]),
-                                "Круги": r["laps_completed"],
-                                "Расч.": format_time(r["projected_time"]),
+                                "Время": format_time(r.get("time_seconds")),
+                                "Круги": r.get("laps_completed", "—"),
+                                "Все": "✅" if r.get("completed_all_laps") else "—",
+                                "Расч.": format_time(r.get("projected_time")),
                             })
                         df_r = pd.DataFrame(tdata)
                         styled = style_standings_table(df_r, sd.qualifiers)
