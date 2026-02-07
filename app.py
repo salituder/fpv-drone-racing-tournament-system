@@ -878,9 +878,9 @@ def get_heat_results(stage_id: int, group_no: int, heat_no: int, track_no: int =
 
 def compute_group_ranking(stage_id: int, group_no: int, discipline: str = "drone_individual",
                           scoring_mode: str = "none") -> pd.DataFrame:
-    """Ранжирование в группе: для дронов — один вылет, для сима — агрегация."""
+    """Ранжирование в группе: для дронов — один вылет, для сима — агрегация + тайбрейк."""
     if discipline == "sim_individual":
-        return compute_sim_group_ranking(stage_id, group_no, scoring_mode)
+        return resolve_sim_tiebreaker(stage_id, group_no, scoring_mode)
     results = get_heat_results(stage_id, group_no, 1)
     if not results:
         return pd.DataFrame()
@@ -1090,12 +1090,66 @@ def get_sim_track_bests(stage_id: int, group_no: int) -> Dict[int, Dict]:
     return result
 
 
+def detect_sim_group_ties(stage_id: int, group_no: int, scoring_mode: str, qualifiers: int = 2) -> List[List[int]]:
+    """Обнаруживает критические ничьи в группе симулятора.
+    Критическая ничья — когда пилоты на границе прохода имеют одинаковые очки
+    (например, 2-е и 3-е место при qualifiers=2).
+    Возвращает список групп pid'ов с критическими ничьими."""
+    ranking = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
+    if ranking.empty or len(ranking) <= qualifiers:
+        return []
+
+    pid_col = "participant_id" if "participant_id" in ranking.columns else "pid"
+    pts = ranking["total_points"].tolist()
+
+    # Ищем ничью на границе: очки на позиции qualifiers-1 (последний проходящий)
+    # совпадают с очками на позиции qualifiers (первый не проходящий)
+    cutoff_pts = pts[qualifiers - 1]  # очки последнего проходящего
+    tied_pids = []
+    for i, p in enumerate(pts):
+        if p == cutoff_pts:
+            tied_pids.append(int(ranking.iloc[i][pid_col]))
+
+    # Критическая ничья только если есть пилоты и по обе стороны границы
+    has_above = any(i < qualifiers for i, p in enumerate(pts) if p == cutoff_pts)
+    has_below = any(i >= qualifiers for i, p in enumerate(pts) if p == cutoff_pts)
+
+    if has_above and has_below and len(tied_pids) > 1:
+        return [tied_pids]
+    return []
+
+
+def resolve_sim_tiebreaker(stage_id: int, group_no: int, scoring_mode: str) -> pd.DataFrame:
+    """Пересчитывает ранжирование группы с учётом тайбрейков (track_no=99)."""
+    ranking = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
+    if ranking.empty:
+        return ranking
+
+    pid_col = "participant_id" if "participant_id" in ranking.columns else "pid"
+
+    # Проверяем, есть ли тайбрейк-вылеты (track_no=99)
+    tb_results = get_heat_results(stage_id, group_no, 1, track_no=99)
+    if not tb_results:
+        return ranking
+
+    # Создаём ключ для тайбрейка: кто лучше в тайбрейке — тот выше при равных очках
+    tb_rank = {r["participant_id"]: r["place"] for r in tb_results}
+
+    # Добавляем тайбрейк-ключ для сортировки
+    ranking["tiebreak"] = ranking[pid_col].map(lambda x: tb_rank.get(int(x), 999))
+    ranking = ranking.sort_values(["total_points", "tiebreak"], ascending=[False, True]).reset_index(drop=True)
+    ranking["rank"] = range(1, len(ranking) + 1)
+    ranking = ranking.drop(columns=["tiebreak"])
+    return ranking
+
+
 def compute_sim_final_standings(stage_id: int, scoring_mode: str) -> pd.DataFrame:
     """Итоги финала симулятора: те же правила, что и групповой этап, но без бонусов."""
-    return compute_sim_group_ranking(stage_id, 1, scoring_mode)
+    return resolve_sim_tiebreaker(stage_id, 1, scoring_mode)
 
 
-def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str = "drone_individual") -> Tuple[bool, str]:
+def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str = "drone_individual",
+                                 scoring_mode: str = "none") -> Tuple[bool, str]:
     """Проверяет, все ли результаты заполнены для текущего этапа.
     Возвращает (ok, message)."""
     all_groups = get_all_groups(stage_id)
@@ -1115,6 +1169,18 @@ def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str =
                     results = get_heat_results(stage_id, gno, attempt, track)
                     if not results:
                         missing.append(f"Группа {gno}, Трасса {track}, Попытка {attempt}: нет результатов")
+            # Проверяем неразрешённые ничьи
+            if not missing:  # только если все результаты заполнены
+                tied = detect_sim_group_ties(stage_id, gno, scoring_mode, stage_def.qualifiers)
+                # Проверяем, разрешена ли ничья тайбрейком
+                if tied:
+                    tb = get_heat_results(stage_id, gno, 1, track_no=99)
+                    if not tb:
+                        tied_ranking = compute_sim_group_ranking(stage_id, gno, scoring_mode)
+                        pid_col = "participant_id" if "participant_id" in tied_ranking.columns else "pid"
+                        for tg in tied:
+                            names = tied_ranking[tied_ranking[pid_col].isin(tg)]["name"].tolist()
+                            missing.append(f"Группа {gno}: ничья между {', '.join(names)} — нужен доп. вылет")
         else:
             # Для дронов: heats_count вылетов (1 для плей-офф, 3 для финала)
             heats_needed = stage_def.heats_count
@@ -1149,7 +1215,7 @@ def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
 
     # Валидация: проверить, что все результаты текущего этапа заполнены
     cur_sd = bracket[cur_idx]
-    ok, msg = check_stage_results_complete(int(cur["id"]), cur_sd, disc)
+    ok, msg = check_stage_results_complete(int(cur["id"]), cur_sd, disc, sm)
     if not ok:
         raise ValueError(msg)
 
@@ -2002,7 +2068,7 @@ with tabs[3]:
                 elif bracket[cur_idx].code == "F":
                     # Финал завершён?
                     final_sd = bracket[cur_idx]
-                    final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd, discipline)
+                    final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd, discipline, scoring_mode)
                     if final_ok:
                         if is_sim:
                             sim_fin = compute_sim_final_standings(int(active["id"]), scoring_mode)
@@ -2169,11 +2235,107 @@ with tabs[4]:
                     # Прогресс заполнения
                     st.divider()
                     st.markdown("**Прогресс заполнения:**")
+                    all_heats_filled = True
                     for tr in [1, 2]:
                         for att in [1, 2, 3]:
                             res = get_heat_results(stage_id, group_no, att, tr)
                             icon = "✅" if res else "⏳"
+                            if not res:
+                                all_heats_filled = False
                             st.caption(f"{icon} {T('track_n').format(tr)}, {T('attempt_n').format(att)}")
+
+                    # Тайбрейк: проверяем ничьи на границе прохода
+                    if all_heats_filled:
+                        tied_groups = detect_sim_group_ties(stage_id, group_no, scoring_mode, sd.qualifiers)
+                        if tied_groups:
+                            st.divider()
+                            st.error("⚠️ **Ничья на границе прохода!** Необходим дополнительный вылет.")
+
+                            for tg in tied_groups:
+                                # Показываем кто в ничьей
+                                ranking_tb = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
+                                pid_col_tb = "participant_id" if "participant_id" in ranking_tb.columns else "pid"
+                                tied_names = ranking_tb[ranking_tb[pid_col_tb].isin(tg)]["name"].tolist()
+                                tied_pts = int(ranking_tb[ranking_tb[pid_col_tb].isin(tg)].iloc[0]["total_points"])
+                                st.warning(f"🤝 Ничья ({tied_pts} оч.): **{', '.join(tied_names)}**")
+
+                            all_tied_pids = []
+                            for tg in tied_groups:
+                                all_tied_pids.extend(tg)
+
+                            st.markdown("### 🔄 Дополнительный вылет")
+                            st.caption("Участвуют пилоты с одинаковыми очками. Результат определит кто проходит дальше.")
+
+                            # track_no=99 — специальный маркер тайбрейка
+                            existing_tb = get_heat_results(stage_id, group_no, 1, track_no=99)
+                            existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+
+                            tb_results = []
+                            members_tb = get_group_members(stage_id, group_no)
+                            for tpid in all_tied_pids:
+                                prow = members_tb[members_tb["pid"] == tpid]
+                                if prow.empty:
+                                    continue
+                                pname = prow.iloc[0]["name"]
+                                ex = existing_tb_map.get(tpid, {})
+
+                                with st.container(border=True):
+                                    st.markdown(f"**{pname}**")
+                                    c1, c2 = st.columns([2, 2])
+                                    with c1:
+                                        ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                        tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                               value=ex_time, step=0.001,
+                                                               key=f"tb_t_{group_no}_{tpid}", format="%.3f")
+                                    with c2:
+                                        ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                        lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                               value=ex_laps, step=0.1,
+                                                               key=f"tb_l_{group_no}_{tpid}", format="%.1f")
+
+                                if tval > 0:
+                                    tb_results.append({
+                                        "pid": tpid, "time_seconds": tval,
+                                        "laps_completed": lval, "completed_all_laps": lval >= total_laps
+                                    })
+
+                            if st.button("💾 Сохранить доп. вылет", type="primary",
+                                         use_container_width=True, key=f"tb_save_{group_no}"):
+                                if len(tb_results) == len(all_tied_pids):
+                                    save_heat(stage_id, group_no, 1, tb_results,
+                                              is_final=False, track_no=99, scoring=SIM_SCORING)
+                                    st.success("Сохранено! Ничья разрешена.")
+                                    st.rerun()
+                                else:
+                                    st.error("Введите результаты для всех участников тайбрейка!")
+
+                            if existing_tb:
+                                st.markdown("**Результаты доп. вылета:**")
+                                tdata = [{"М": r["place"], "Пилот": r["name"],
+                                          "Время": format_time(r.get("time_seconds")),
+                                          "Круги": r.get("laps_completed", "—")} for r in existing_tb]
+                                st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
+
+                                # Обновлённая сводка с учётом тайбрейка
+                                st.markdown("### 📊 Обновлённая сводка (с учётом тайбрейка)")
+                                resolved_ranking = resolve_sim_tiebreaker(stage_id, group_no, scoring_mode)
+                                if not resolved_ranking.empty:
+                                    pid_col_r = "participant_id" if "participant_id" in resolved_ranking.columns else "pid"
+                                    track_bests_r = get_sim_track_bests(stage_id, group_no)
+                                    rr_rows = []
+                                    for _, sr in resolved_ranking.iterrows():
+                                        pid = int(sr[pid_col_r])
+                                        tbr = track_bests_r.get(pid, {})
+                                        t1 = format_time(tbr.get("t1")) if tbr.get("t1") else "—"
+                                        t2 = format_time(tbr.get("t2")) if tbr.get("t2") else "—"
+                                        rr_rows.append({
+                                            "М": int(sr["rank"]), "Пилот": sr["name"],
+                                            "Трасса 1": t1, "Трасса 2": t2,
+                                            "Очки": int(sr["total_points"]),
+                                        })
+                                    rr_disp = pd.DataFrame(rr_rows)
+                                    styled_rr = style_standings_table(rr_disp, sd.qualifiers)
+                                    st.dataframe(styled_rr, use_container_width=True, hide_index=True)
 
             else:
                 # ========== ДРОНЫ: один вылет ==========
