@@ -612,6 +612,27 @@ def init_db():
         FOREIGN KEY(participant_id) REFERENCES participants(id) ON DELETE CASCADE
     )""")
 
+    # === Миграции: добавить столбцы, если их нет (для обновления старых БД) ===
+    try:
+        c.execute("ALTER TABLE tournaments ADD COLUMN scoring_mode TEXT NOT NULL DEFAULT 'none'")
+    except Exception:
+        pass  # столбец уже существует
+
+    try:
+        c.execute("ALTER TABLE heats ADD COLUMN track_no INTEGER NOT NULL DEFAULT 1")
+    except Exception:
+        pass  # столбец уже существует
+
+    # Пересоздаём уникальный индекс для heats, если старый (без track_no) ещё на месте
+    try:
+        c.execute("DROP INDEX IF EXISTS sqlite_autoindex_heats_1")
+    except Exception:
+        pass
+    try:
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_heats_group_track_heat ON heats(group_id, track_no, heat_no)")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
