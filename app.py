@@ -42,6 +42,106 @@ BASE_CSS = """
     background: #e0e0e0;
     color: #666;
 }
+/* Bracket tree */
+.bracket-container {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    overflow-x: auto;
+    padding: 20px 0;
+}
+.bracket-round {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 200px;
+    position: relative;
+}
+.bracket-round-title {
+    text-align: center;
+    font-weight: 700;
+    font-size: 1em;
+    margin-bottom: 12px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: #2a2a2a;
+    color: #ccc;
+}
+.bracket-round-title.active-round {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+.bracket-round-title.done-round {
+    background: #2e7d32;
+    color: #90EE90;
+}
+.bracket-round-title.final-round {
+    background: linear-gradient(135deg, #d4a017 0%, #b8860b 100%);
+    color: white;
+}
+.bracket-group {
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 8px;
+    margin: 8px 4px;
+    padding: 8px;
+    position: relative;
+}
+.bracket-group-title {
+    font-size: 0.75em;
+    color: #888;
+    margin-bottom: 4px;
+    text-align: center;
+}
+.bracket-player {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 6px;
+    font-size: 0.82em;
+    border-radius: 4px;
+    margin: 1px 0;
+}
+.bracket-player.advancing {
+    background: #1a3a1a;
+    color: #90EE90;
+}
+.bracket-player.eliminated {
+    background: #3a1a1a;
+    color: #FFB6B6;
+}
+.bracket-player.gold {
+    background: #5C4B00;
+    color: #FFD700;
+    font-weight: 700;
+}
+.bracket-player.silver {
+    background: #3A3A3A;
+    color: #C0C0C0;
+}
+.bracket-player.bronze {
+    background: #3D2B1F;
+    color: #CD7F32;
+}
+.bracket-player.pending-player {
+    color: #666;
+}
+.bracket-connector {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    width: 30px;
+    min-width: 30px;
+    position: relative;
+}
+.connector-line {
+    border-top: 2px solid #555;
+    width: 100%;
+}
+.connector-vert {
+    border-right: 2px solid #555;
+    height: 50%;
+    width: 50%;
+}
 </style>
 """
 
@@ -1391,105 +1491,112 @@ with tabs[3]:
 
         st.divider()
 
-        # Колонки для этапов
-        cols = st.columns(len(bracket))
+        # Построение визуальной сетки (HTML)
+        bracket_html = '<div class="bracket-container">'
+
         for idx, sd in enumerate(bracket):
-            with cols[idx]:
-                sname = sd.display_name.get(lang, sd.code)
-                if sd.code == "F":
-                    st.markdown(f"### 🏆 {sname}")
+            sname = sd.display_name.get(lang, sd.code)
+            stage_row = all_stages[all_stages["stage_idx"] == idx] if not all_stages.empty else pd.DataFrame()
+            status = ""
+            stage_id_br = None
+            if not stage_row.empty:
+                stage_id_br = int(stage_row.iloc[0]["id"])
+                status = stage_row.iloc[0]["status"]
+
+            # Заголовок раунда
+            title_class = "bracket-round-title"
+            if sd.code == "F":
+                title_class += " final-round"
+            elif status == "active":
+                title_class += " active-round"
+            elif status == "done":
+                title_class += " done-round"
+
+            status_icon = ""
+            if status == "active":
+                status_icon = " ▶"
+            elif status == "done":
+                status_icon = " ✓"
+
+            round_icon = "🏆 " if sd.code == "F" else ""
+            bracket_html += f'<div class="bracket-round">'
+            bracket_html += f'<div class="{title_class}">{round_icon}{sname}{status_icon}</div>'
+
+            if sd.code == "F" and stage_id_br:
+                # Финал — показываем итоги с очками
+                fin_standings = compute_final_standings(stage_id_br)
+                if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
+                    bracket_html += '<div class="bracket-group">'
+                    medals_html = {1: "🥇", 2: "🥈", 3: "🥉"}
+                    medal_class = {1: "gold", 2: "silver", 3: "bronze"}
+                    for _, fr in fin_standings.iterrows():
+                        rank = int(fr["rank"])
+                        cls = medal_class.get(rank, "")
+                        medal = medals_html.get(rank, f"{rank}.")
+                        bonus = " +1б" if int(fr["bonus"]) > 0 else ""
+                        bracket_html += f'<div class="bracket-player {cls}">'
+                        bracket_html += f'<span>{medal} {fr["name"]}</span>'
+                        bracket_html += f'<span><b>{int(fr["total"])} оч.</b> ({int(fr["wins"])} поб.{bonus})</span>'
+                        bracket_html += '</div>'
+                    bracket_html += '</div>'
                 else:
-                    st.markdown(f"### {sname}")
-
-                stage_row = all_stages[all_stages["stage_idx"] == idx] if not all_stages.empty else pd.DataFrame()
-                if not stage_row.empty:
-                    stage_id = int(stage_row.iloc[0]["id"])
-                    status = stage_row.iloc[0]["status"]
-
-                    if status == "active":
-                        st.success("▶ Идёт")
-                    elif status == "done":
-                        st.caption("✓ Завершён")
-
-                    all_groups = get_all_groups(stage_id)
-
-                    # Финал — особое отображение с очками
-                    if sd.code == "F":
-                        fin_standings = compute_final_standings(stage_id)
-                        if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
-                            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-                            tdata = []
-                            for _, fr in fin_standings.iterrows():
-                                rank = int(fr["rank"])
-                                medal = medals.get(rank, "")
-                                bonus_str = "+1" if int(fr["bonus"]) > 0 else ""
-                                tdata.append({
-                                    "М": rank,
-                                    "": medal,
-                                    "Пилот": fr["name"],
-                                    "Очки": int(fr["total"]),
-                                    "Баллы": int(fr["total_points"]),
-                                    "Бонус": bonus_str,
-                                    "Побед": int(fr["wins"]),
-                                })
-                            df_d = pd.DataFrame(tdata)
-                            styled = style_final_podium(df_d)
-                            st.dataframe(styled, use_container_width=True, hide_index=True,
-                                         height=35 + 35 * len(tdata))
+                    # Финал ещё без результатов
+                    bracket_html += '<div class="bracket-group">'
+                    if stage_id_br:
+                        members_f = get_group_members(stage_id_br, 1)
+                        if not members_f.empty:
+                            for _, r in members_f.iterrows():
+                                bracket_html += f'<div class="bracket-player pending-player"><span>{r["name"]}</span><span>—</span></div>'
                         else:
-                            # Финал ещё не начался — показать участников
-                            for gno in sorted(all_groups.keys()):
-                                members = all_groups[gno]
-                                if not members.empty:
-                                    tdata = [{"М": i + 1, "Пилот": r["name"], "Очки": "—", "Побед": "—"}
-                                             for i, (_, r) in enumerate(members.iterrows())]
-                                    st.dataframe(pd.DataFrame(tdata), use_container_width=True,
-                                                 hide_index=True, height=35 + 35 * len(tdata))
-                                else:
-                                    st.caption("⏳ Ожидает")
+                            for i in range(sd.group_size):
+                                bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
                     else:
-                        # Обычный плей-офф этап
-                        for gno in sorted(all_groups.keys()):
-                            members = all_groups[gno]
-                            st.markdown(f"**{T('group')} {gno}**")
+                        for i in range(sd.group_size):
+                            bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
+                    bracket_html += '</div>'
+            elif stage_id_br:
+                # Обычный этап с результатами
+                all_groups_br = get_all_groups(stage_id_br)
+                for gno in sorted(all_groups_br.keys()):
+                    members = all_groups_br[gno]
+                    bracket_html += f'<div class="bracket-group">'
+                    bracket_html += f'<div class="bracket-group-title">Гр. {gno}</div>'
+                    results = get_heat_results(stage_id_br, gno, 1)
+                    if results:
+                        for r in results:
+                            place = r["place"]
+                            cls = "advancing" if place <= sd.qualifiers else "eliminated"
+                            time_str = format_time(r.get("time_seconds"))
+                            bracket_html += f'<div class="bracket-player {cls}">'
+                            bracket_html += f'<span>{place}. {r["name"]}</span>'
+                            bracket_html += f'<span>{time_str}</span>'
+                            bracket_html += '</div>'
+                    elif not members.empty:
+                        for i, (_, r) in enumerate(members.iterrows()):
+                            bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. {r["name"]}</span><span>—</span></div>'
+                    bracket_html += '</div>'
+            else:
+                # Этап ещё не создан
+                for gno in range(1, sd.group_count + 1):
+                    bracket_html += f'<div class="bracket-group">'
+                    bracket_html += f'<div class="bracket-group-title">Гр. {gno}</div>'
+                    for i in range(sd.group_size):
+                        bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. ???</span><span>—</span></div>'
+                    bracket_html += '</div>'
 
-                            results = get_heat_results(stage_id, gno, 1)
-                            if results:
-                                tdata = []
-                                for r in results:
-                                    tdata.append({
-                                        "М": r["place"],
-                                        "Пилот": r["name"],
-                                        "Время": format_time(r.get("time_seconds")),
-                                        "Круги": r.get("laps_completed", "—"),
-                                        "Все": "✅" if r.get("completed_all_laps") else "—",
-                                        "Расч.": format_time(r.get("projected_time")),
-                                    })
-                                df_d = pd.DataFrame(tdata)
-                                styled = style_standings_table(df_d, sd.qualifiers)
-                                st.dataframe(styled, use_container_width=True, hide_index=True,
-                                             height=35 + 35 * len(tdata))
-                            elif not members.empty:
-                                tdata = [{"М": i + 1, "Пилот": r["name"], "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
-                                         for i, (_, r) in enumerate(members.iterrows())]
-                                st.dataframe(pd.DataFrame(tdata), use_container_width=True,
-                                             hide_index=True, height=35 + 35 * len(tdata))
-                            else:
-                                st.caption("⏳ Ожидает")
-                else:
-                    st.caption("⏳ Ожидает")
-                    if sd.code == "F":
-                        tdata = [{"М": i + 1, "Пилот": "—", "Очки": "—", "Побед": "—"}
-                                 for i in range(sd.group_size)]
-                        st.dataframe(pd.DataFrame(tdata), use_container_width=True,
-                                     hide_index=True, height=35 + 35 * sd.group_size)
-                    else:
-                        for gno in range(1, sd.group_count + 1):
-                            st.markdown(f"**{T('group')} {gno}**")
-                            tdata = [{"М": i + 1, "Пилот": "—", "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
-                                     for i in range(sd.group_size)]
-                            st.dataframe(pd.DataFrame(tdata), use_container_width=True,
-                                         hide_index=True, height=35 + 35 * sd.group_size)
+            bracket_html += '</div>'  # bracket-round
+
+            # Коннектор между раундами (кроме последнего)
+            if idx < len(bracket) - 1:
+                bracket_html += '<div class="bracket-connector">'
+                bracket_html += '<div style="flex:1; border-right: 2px solid #555; border-top: 2px solid #555; margin-left: 50%;"></div>'
+                bracket_html += '<div style="flex:1; border-right: 2px solid #555; border-bottom: 2px solid #555; margin-left: 50%;"></div>'
+                bracket_html += '</div>'
+
+        bracket_html += '</div>'
+
+        st.markdown(bracket_html, unsafe_allow_html=True)
+        st.caption("🟢 Зелёный = проходит | 🔴 Красный = выбывает | 🥇🥈🥉 Медали финала")
 
         # Кнопка перехода
         if t_status == "bracket":
@@ -1526,8 +1633,6 @@ with tabs[3]:
                                 st.balloons()
                                 st.rerun()
 
-        if not all_stages.empty:
-            st.caption("🟢 Зелёный = проходит | 🔴 Красный = выбывает")
 
 # ============================================================
 # TAB 4: Плей-офф (ввод результатов)
@@ -1663,11 +1768,15 @@ with tabs[5]:
     else:
         stage_id = int(final_stage["id"])
         members = get_group_members(stage_id, 1)
+        is_finished = t_status == "finished"
 
         if members.empty:
             st.warning("Финалисты не определены")
         else:
-            st.success(f"🏆 Финалисты: {', '.join(members['name'].tolist())}")
+            if is_finished:
+                st.success("🏆 **ТУРНИР ЗАВЕРШЁН!**")
+            else:
+                st.success(f"🏆 Финалисты: {', '.join(members['name'].tolist())}")
             st.caption(T("bonus_note"))
 
             # 3 вылета
@@ -1678,123 +1787,24 @@ with tabs[5]:
                 existing = get_heat_results(stage_id, 1, heat_no)
                 existing_map = {r["participant_id"]: r for r in existing}
 
-                results_to_save = []
-                for _, m in members.iterrows():
-                    pid = int(m["pid"])
-                    pname = m["name"]
-                    ex = existing_map.get(pid, {})
-
-                    with st.container(border=True):
-                        st.markdown(f"**{pname}**")
-                        c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
-                        with c1:
-                            ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
-                            tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                   value=ex_time, step=0.001,
-                                                   key=f"fn_t_{heat_no}_{pid}", format="%.3f")
-                        with c2:
-                            ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
-                            lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                                   value=ex_laps, step=0.1,
-                                                   key=f"fn_l_{heat_no}_{pid}", format="%.1f")
-                        with c3:
-                            ex_all = bool(ex.get("completed_all_laps", 0))
-                            aval = st.checkbox("Все круги", value=ex_all, key=f"fn_a_{heat_no}_{pid}",
-                                               help="Отметьте, если пилот прошёл все круги за отведённое время")
-                        with c4:
-                            if tval > 0 and lval > 0:
-                                proj = tval if aval else calc_projected_time(tval, lval, total_laps)
-                                st.metric("Расчётное", format_time(proj))
-
-                    if tval > 0:
-                        results_to_save.append({
-                            "pid": pid, "time_seconds": tval,
-                            "laps_completed": lval, "completed_all_laps": aval
-                        })
-
-                if st.button(f"💾 Сохранить вылет {heat_no}", type="primary", key=f"fn_save_{heat_no}"):
-                    if len(results_to_save) == len(members):
-                        save_heat(stage_id, 1, heat_no, results_to_save, is_final=True)
-                        st.success(T("saved"))
-                        st.rerun()
+                if is_finished:
+                    # Только чтение — показываем таблицу результатов
+                    if existing:
+                        tdata = [{"М": r["place"], "Пилот": r["name"],
+                                  "Время": format_time(r["time_seconds"]),
+                                  "Круги": r.get("laps_completed", "—"),
+                                  "Все": "✅" if r.get("completed_all_laps") else "—",
+                                  "Очки": f"+{r['points']}"} for r in existing]
+                        st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
                     else:
-                        st.error("Введите результаты для всех!")
-
-                # Показываем результаты вылета
-                results = get_heat_results(stage_id, 1, heat_no)
-                if results:
-                    tdata = [{"М": r["place"], "Пилот": r["name"],
-                              "Время": format_time(r["time_seconds"]),
-                              "Очки": f"+{r['points']}"} for r in results]
-                    st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
-
-            # Итоговая таблица
-            st.divider()
-            st.markdown(f"### 🏆 {T('final_standings')}")
-
-            standings = compute_final_standings(stage_id)
-            if not standings.empty:
-                for _, row in standings.iterrows():
-                    rank = int(row["rank"])
-                    name = row["name"]
-                    total = int(row["total"])
-                    pts = int(row["total_points"])
-                    wins = int(row["wins"])
-                    bonus = int(row["bonus"])
-
-                    if rank == 1:
-                        icon = "🥇"
-                    elif rank == 2:
-                        icon = "🥈"
-                    elif rank == 3:
-                        icon = "🥉"
-                    else:
-                        icon = f"{rank}."
-
-                    bonus_str = " (+1 бонус)" if bonus > 0 else ""
-                    if rank == 1:
-                        st.success(f"{icon} **{name}** — {total} оч. ({pts} + {bonus} бонус, {wins} поб.) {T('champion')}")
-                    else:
-                        st.write(f"{icon} **{name}** — {total} оч. ({pts}{bonus_str}, {wins} поб.)")
-
-                # Проверяем ничьи
-                tied_groups = detect_final_ties(standings)
-                has_basic_3 = int(standings.iloc[0].get("heats_played", 0)) >= 3
-
-                if has_basic_3 and tied_groups:
-                    # Есть неразрешённые ничьи — нужен тайбрейк
-                    st.divider()
-                    st.error("⚠️ **Обнаружена ничья!** Необходим дополнительный вылет для определения мест.")
-
-                    # Определяем номер следующего тайбрейка
-                    group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1",
-                                       (stage_id,)).iloc[0]["id"])
-                    max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?", (group_id,))
-                    max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 3
-                    next_tb = max_heat + 1
-
-                    # Показываем кто в ничьей
-                    for tg in tied_groups:
-                        tied_names = standings[standings["pid"].isin(tg)]["name"].tolist()
-                        tied_total = int(standings[standings["pid"].isin(tg)].iloc[0]["total"])
-                        st.warning(f"🤝 Ничья ({tied_total} оч.): **{', '.join(tied_names)}**")
-
-                    # Все участники с ничьей участвуют в тайбрейке
-                    all_tied_pids = []
-                    for tg in tied_groups:
-                        all_tied_pids.extend(tg)
-
-                    st.markdown(f"### 🔄 Дополнительный вылет #{next_tb - 3}")
-                    st.caption("Участвуют только пилоты с одинаковым количеством очков. Результат определит итоговые места.")
-
-                    existing_tb = get_heat_results(stage_id, 1, next_tb)
-                    existing_tb_map = {r["participant_id"]: r for r in existing_tb}
-
-                    tb_results = []
-                    for tpid in all_tied_pids:
-                        prow = standings[standings["pid"] == tpid].iloc[0]
-                        pname = prow["name"]
-                        ex = existing_tb_map.get(tpid, {})
+                        st.caption("Нет результатов")
+                else:
+                    # Редактирование
+                    results_to_save = []
+                    for _, m in members.iterrows():
+                        pid = int(m["pid"])
+                        pname = m["name"]
+                        ex = existing_map.get(pid, {})
 
                         with st.container(border=True):
                             st.markdown(f"**{pname}**")
@@ -1803,49 +1813,156 @@ with tabs[5]:
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                 tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
                                                        value=ex_time, step=0.001,
-                                                       key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
+                                                       key=f"fn_t_{heat_no}_{pid}", format="%.3f")
                             with c2:
                                 ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
                                 lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
                                                        value=ex_laps, step=0.1,
-                                                       key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
+                                                       key=f"fn_l_{heat_no}_{pid}", format="%.1f")
                             with c3:
                                 ex_all = bool(ex.get("completed_all_laps", 0))
-                                aval = st.checkbox("Все круги", value=ex_all, key=f"tb_a_{next_tb}_{tpid}",
+                                aval = st.checkbox("Все круги", value=ex_all, key=f"fn_a_{heat_no}_{pid}",
                                                    help="Отметьте, если пилот прошёл все круги за отведённое время")
                             with c4:
                                 if tval > 0 and lval > 0:
-                                    proj = tval if aval else calc_projected_time(tval, lval, total_laps)
+                                    proj = tval if aval else calc_projected_time(tval, laps_val=lval, total_laps=total_laps)
                                     st.metric("Расчётное", format_time(proj))
 
                         if tval > 0:
-                            tb_results.append({
-                                "pid": tpid, "time_seconds": tval,
+                            results_to_save.append({
+                                "pid": pid, "time_seconds": tval,
                                 "laps_completed": lval, "completed_all_laps": aval
                             })
 
-                    if st.button(f"💾 Сохранить доп. вылет #{next_tb - 3}", type="primary",
-                                 use_container_width=True, key=f"tb_save_{next_tb}"):
-                        if len(tb_results) == len(all_tied_pids):
-                            # Сохраняем тайбрейк (без начисления финальных очков)
-                            save_heat(stage_id, 1, next_tb, tb_results, is_final=False)
-                            st.success("Сохранено! Проверьте итоговую таблицу.")
+                    if st.button(f"💾 Сохранить вылет {heat_no}", type="primary", key=f"fn_save_{heat_no}"):
+                        if len(results_to_save) == len(members):
+                            save_heat(stage_id, 1, heat_no, results_to_save, is_final=True)
+                            st.success(T("saved"))
                             st.rerun()
                         else:
-                            st.error("Введите результаты для всех участников тайбрейка!")
+                            st.error("Введите результаты для всех!")
 
-                    # Показываем результаты тайбрейка если есть
-                    if existing_tb:
-                        st.markdown(f"**Результаты доп. вылета #{next_tb - 3}:**")
+                    # Показываем результаты вылета
+                    results = get_heat_results(stage_id, 1, heat_no)
+                    if results:
                         tdata = [{"М": r["place"], "Пилот": r["name"],
-                                  "Время": format_time(r.get("time_seconds")),
-                                  "Круги": r.get("laps_completed", "—")} for r in existing_tb]
+                                  "Время": format_time(r["time_seconds"]),
+                                  "Очки": f"+{r['points']}"} for r in results]
                         st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
 
-                elif has_basic_3 and not tied_groups:
-                    # Нет ничьих — можно завершать
-                    st.divider()
-                    if t_status != "finished":
+            # Итоговая таблица
+            st.divider()
+            st.markdown(f"### 🏆 {T('final_standings')}")
+
+            standings = compute_final_standings(stage_id)
+            if not standings.empty:
+                # Итоговая таблица с медалями
+                medal_data = []
+                for _, row in standings.iterrows():
+                    rank = int(row["rank"])
+                    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+                    bonus_str = "+1" if int(row["bonus"]) > 0 else ""
+                    medal_data.append({
+                        "М": rank,
+                        "": medals.get(rank, ""),
+                        "Пилот": row["name"],
+                        "Очки": int(row["total"]),
+                        "Баллы": int(row["total_points"]),
+                        "Бонус": bonus_str,
+                        "Побед": int(row["wins"]),
+                    })
+                df_final = pd.DataFrame(medal_data)
+                styled_final = style_final_podium(df_final)
+                st.dataframe(styled_final, use_container_width=True, hide_index=True)
+
+                if is_finished:
+                    # Турнир завершён — просто показываем чемпиона
+                    champion = standings.iloc[0]["name"]
+                    st.success(f"🏆 **ЧЕМПИОН: {champion}!** {T('champion')}")
+                else:
+                    # Проверяем ничьи
+                    tied_groups = detect_final_ties(standings)
+                    has_basic_3 = int(standings.iloc[0].get("heats_played", 0)) >= 3
+
+                    if has_basic_3 and tied_groups:
+                        # Есть неразрешённые ничьи — нужен тайбрейк
+                        st.divider()
+                        st.error("⚠️ **Обнаружена ничья!** Необходим дополнительный вылет для определения мест.")
+
+                        # Определяем номер следующего тайбрейка
+                        group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1",
+                                           (stage_id,)).iloc[0]["id"])
+                        max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?", (group_id,))
+                        max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 3
+                        next_tb = max_heat + 1
+
+                        for tg in tied_groups:
+                            tied_names = standings[standings["pid"].isin(tg)]["name"].tolist()
+                            tied_total = int(standings[standings["pid"].isin(tg)].iloc[0]["total"])
+                            st.warning(f"🤝 Ничья ({tied_total} оч.): **{', '.join(tied_names)}**")
+
+                        all_tied_pids = []
+                        for tg in tied_groups:
+                            all_tied_pids.extend(tg)
+
+                        st.markdown(f"### 🔄 Дополнительный вылет #{next_tb - 3}")
+                        st.caption("Участвуют только пилоты с одинаковым количеством очков. Результат определит итоговые места.")
+
+                        existing_tb = get_heat_results(stage_id, 1, next_tb)
+                        existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+
+                        tb_results = []
+                        for tpid in all_tied_pids:
+                            prow = standings[standings["pid"] == tpid].iloc[0]
+                            pname = prow["name"]
+                            ex = existing_tb_map.get(tpid, {})
+
+                            with st.container(border=True):
+                                st.markdown(f"**{pname}**")
+                                c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+                                with c1:
+                                    ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                    tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                           value=ex_time, step=0.001,
+                                                           key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
+                                with c2:
+                                    ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                    lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                           value=ex_laps, step=0.1,
+                                                           key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
+                                with c3:
+                                    ex_all = bool(ex.get("completed_all_laps", 0))
+                                    aval = st.checkbox("Все круги", value=ex_all, key=f"tb_a_{next_tb}_{tpid}",
+                                                       help="Отметьте, если пилот прошёл все круги за отведённое время")
+                                with c4:
+                                    if tval > 0 and lval > 0:
+                                        proj = tval if aval else calc_projected_time(tval, lval, total_laps)
+                                        st.metric("Расчётное", format_time(proj))
+
+                            if tval > 0:
+                                tb_results.append({
+                                    "pid": tpid, "time_seconds": tval,
+                                    "laps_completed": lval, "completed_all_laps": aval
+                                })
+
+                        if st.button(f"💾 Сохранить доп. вылет #{next_tb - 3}", type="primary",
+                                     use_container_width=True, key=f"tb_save_{next_tb}"):
+                            if len(tb_results) == len(all_tied_pids):
+                                save_heat(stage_id, 1, next_tb, tb_results, is_final=False)
+                                st.success("Сохранено! Проверьте итоговую таблицу.")
+                                st.rerun()
+                            else:
+                                st.error("Введите результаты для всех участников тайбрейка!")
+
+                        if existing_tb:
+                            st.markdown(f"**Результаты доп. вылета #{next_tb - 3}:**")
+                            tdata = [{"М": r["place"], "Пилот": r["name"],
+                                      "Время": format_time(r.get("time_seconds")),
+                                      "Круги": r.get("laps_completed", "—")} for r in existing_tb]
+                            st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
+
+                    elif has_basic_3 and not tied_groups:
+                        st.divider()
                         if st.button("🏆 Завершить турнир", type="primary", use_container_width=True, key="finish_tournament"):
                             exec_sql("UPDATE stages SET status='done' WHERE id=?", (stage_id,))
                             exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
