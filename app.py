@@ -50,24 +50,17 @@ BASE_CSS = """
     overflow-x: auto;
     padding: 20px 0;
 }
-.bracket-stage-wrapper {
-    display: flex;
-    align-items: center;
-}
-.bracket-round {
+.bracket-round-wrapper {
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    min-width: 280px;
-    max-width: 320px;
-    position: relative;
+    align-items: stretch;
     flex-shrink: 0;
 }
 .bracket-round-title {
     text-align: center;
     font-weight: 700;
     font-size: 1em;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
     padding: 6px 12px;
     border-radius: 8px;
     background: #2a2a2a;
@@ -85,13 +78,23 @@ BASE_CSS = """
     background: linear-gradient(135deg, #d4a017 0%, #b8860b 100%);
     color: white;
 }
+.bracket-groups-row {
+    display: flex;
+    align-items: stretch;
+}
+.bracket-groups-col {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 280px;
+    max-width: 340px;
+}
 .bracket-group {
     background: #1e1e1e;
     border: 1px solid #444;
     border-radius: 8px;
     margin: 6px 0;
     padding: 8px 10px;
-    position: relative;
 }
 .bracket-group-title {
     font-size: 0.78em;
@@ -137,26 +140,24 @@ BASE_CSS = """
     display: flex;
     flex-direction: column;
     justify-content: center;
-    width: 50px;
-    min-width: 50px;
+    width: 60px;
+    min-width: 60px;
     flex-shrink: 0;
-    align-self: center;
+    margin-right: 10px;
 }
-.bracket-connector-inner {
-    display: flex;
-    flex-direction: column;
-}
-.bracket-connector-inner .conn-top {
+.bracket-conn-top {
+    flex: 1;
     border-right: 2px solid #555;
     border-top: 2px solid #555;
-    margin-left: 50%;
-    height: 20px;
+    margin-left: 40%;
+    min-height: 10px;
 }
-.bracket-connector-inner .conn-bottom {
+.bracket-conn-bottom {
+    flex: 1;
     border-right: 2px solid #555;
     border-bottom: 2px solid #555;
-    margin-left: 50%;
-    height: 20px;
+    margin-left: 40%;
+    min-height: 10px;
 }
 </style>
 """
@@ -1535,11 +1536,16 @@ with tabs[3]:
                 status_icon = " ✓"
 
             round_icon = "🏆 " if sd.code == "F" else ""
-            bracket_html += f'<div class="bracket-round">'
-            bracket_html += f'<div class="{title_class}">{round_icon}{sname}{status_icon}</div>'
+            has_connector = idx < len(bracket) - 1
 
+            # Обёртка: заголовок + (группы + коннектор)
+            bracket_html += '<div class="bracket-round-wrapper">'
+            bracket_html += f'<div class="{title_class}">{round_icon}{sname}{status_icon}</div>'
+            bracket_html += '<div class="bracket-groups-row">'
+            bracket_html += '<div class="bracket-groups-col">'
+
+            # --- Содержимое групп ---
             if sd.code == "F" and stage_id_br:
-                # Финал — показываем итоги с очками
                 fin_standings = compute_final_standings(stage_id_br)
                 if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
                     bracket_html += '<div class="bracket-group">'
@@ -1556,7 +1562,6 @@ with tabs[3]:
                         bracket_html += '</div>'
                     bracket_html += '</div>'
                 else:
-                    # Финал ещё без результатов
                     bracket_html += '<div class="bracket-group">'
                     if stage_id_br:
                         members_f = get_group_members(stage_id_br, 1)
@@ -1571,7 +1576,6 @@ with tabs[3]:
                             bracket_html += f'<div class="bracket-player pending-player"><span>???</span><span>—</span></div>'
                     bracket_html += '</div>'
             elif stage_id_br:
-                # Обычный этап с результатами
                 all_groups_br = get_all_groups(stage_id_br)
                 for gno in sorted(all_groups_br.keys()):
                     members = all_groups_br[gno]
@@ -1592,7 +1596,6 @@ with tabs[3]:
                             bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. {r["name"]}</span><span>—</span></div>'
                     bracket_html += '</div>'
             else:
-                # Этап ещё не создан
                 for gno in range(1, sd.group_count + 1):
                     bracket_html += f'<div class="bracket-group">'
                     bracket_html += f'<div class="bracket-group-title">Гр. {gno}</div>'
@@ -1600,16 +1603,17 @@ with tabs[3]:
                         bracket_html += f'<div class="bracket-player pending-player"><span>{i+1}. ???</span><span>—</span></div>'
                     bracket_html += '</div>'
 
-            bracket_html += '</div>'  # bracket-round
+            bracket_html += '</div>'  # bracket-groups-col
 
-            # Коннектор между раундами (кроме последнего)
-            if idx < len(bracket) - 1:
+            # Коннектор — внутри groups-row, растягивается на высоту групп
+            if has_connector:
                 bracket_html += '<div class="bracket-connector">'
-                bracket_html += '<div class="bracket-connector-inner">'
-                bracket_html += '<div class="conn-top"></div>'
-                bracket_html += '<div class="conn-bottom"></div>'
+                bracket_html += '<div class="bracket-conn-top"></div>'
+                bracket_html += '<div class="bracket-conn-bottom"></div>'
                 bracket_html += '</div>'
-                bracket_html += '</div>'
+
+            bracket_html += '</div>'  # bracket-groups-row
+            bracket_html += '</div>'  # bracket-round-wrapper
 
         bracket_html += '</div>'
 
