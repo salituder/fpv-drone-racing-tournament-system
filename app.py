@@ -1047,10 +1047,54 @@ with tabs[1]:
                     st.rerun()
 
     with col2:
-        participants = qdf("""SELECT start_number as '№', name as 'Пилот'
-                              FROM participants WHERE tournament_id=?
-                              ORDER BY COALESCE(start_number, 9999), name""", (tournament_id,))
-        st.dataframe(participants, use_container_width=True, hide_index=True, height=500)
+        participants_raw = qdf("""SELECT id, start_number, name
+                                  FROM participants WHERE tournament_id=?
+                                  ORDER BY COALESCE(start_number, 9999), name""", (tournament_id,))
+
+        if participants_raw.empty:
+            st.info("Пока нет участников. Добавьте слева.")
+        else:
+            st.markdown(f"**Всего: {len(participants_raw)} участников**")
+
+            for _, row in participants_raw.iterrows():
+                pid = int(row["id"])
+                pname = row["name"]
+                sn = f"#{int(row['start_number'])}" if pd.notna(row["start_number"]) else ""
+
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([1, 5, 2])
+                    with c1:
+                        st.markdown(f"**{sn}**" if sn else "—")
+                    with c2:
+                        # Inline edit
+                        edit_key = f"edit_mode_{pid}"
+                        if st.session_state.get(edit_key, False):
+                            new_name = st.text_input("Имя", value=pname, key=f"edit_name_{pid}", label_visibility="collapsed")
+                            ec1, ec2 = st.columns(2)
+                            with ec1:
+                                if st.button("✅", key=f"save_edit_{pid}", use_container_width=True):
+                                    if new_name.strip():
+                                        exec_sql("UPDATE participants SET name=? WHERE id=?", (new_name.strip(), pid))
+                                    st.session_state[edit_key] = False
+                                    st.rerun()
+                            with ec2:
+                                if st.button("❌", key=f"cancel_edit_{pid}", use_container_width=True):
+                                    st.session_state[edit_key] = False
+                                    st.rerun()
+                        else:
+                            st.markdown(pname)
+                    with c3:
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button("✏️", key=f"btn_edit_{pid}", use_container_width=True):
+                                st.session_state[f"edit_mode_{pid}"] = True
+                                st.rerun()
+                        with bc2:
+                            if st.button("🗑️", key=f"btn_del_{pid}", use_container_width=True):
+                                exec_sql("DELETE FROM participants WHERE id=?", (pid,))
+                                # Также удаляем квалификацию если есть
+                                exec_sql("DELETE FROM qualification_results WHERE participant_id=?", (pid,))
+                                st.rerun()
 
 # ============================================================
 # TAB 2: Квалификация
