@@ -669,12 +669,14 @@ def compute_group_ranking(stage_id: int, group_no: int) -> pd.DataFrame:
 
 
 def compute_final_standings(stage_id: int) -> pd.DataFrame:
-    """Итоги финала: сумма очков за 3 вылета + бонус."""
+    """Итоги финала: сумма очков за 3 основных вылета + бонус.
+    Тайбрейкеры (вылеты 4+) используются только для разрешения ничьих."""
     group_id_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1", (stage_id,))
     if group_id_df.empty:
         return pd.DataFrame()
     group_id = int(group_id_df.iloc[0]["id"])
 
+    # Считаем очки только за основные 3 вылета
     df = qdf("""
         SELECT p.id as pid, p.name, p.start_number,
                COALESCE(SUM(hr.points), 0) as total_points,
@@ -682,7 +684,7 @@ def compute_final_standings(stage_id: int) -> pd.DataFrame:
                COUNT(hr.heat_id) as heats_played
         FROM group_members gm
         JOIN participants p ON p.id=gm.participant_id
-        LEFT JOIN heats h ON h.group_id=gm.group_id
+        LEFT JOIN heats h ON h.group_id=gm.group_id AND h.heat_no <= 3
         LEFT JOIN heat_results hr ON hr.heat_id=h.id AND hr.participant_id=p.id
         WHERE gm.group_id=?
         GROUP BY p.id
@@ -694,9 +696,48 @@ def compute_final_standings(stage_id: int) -> pd.DataFrame:
     # Бонус +1 за 2+ побед
     df["bonus"] = (df["wins"] >= 2).astype(int)
     df["total"] = df["total_points"] + df["bonus"]
-    df = df.sort_values(["total", "wins"], ascending=[False, False]).reset_index(drop=True)
+
+    # Узнаём максимальный номер тайбрейка
+    max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?", (group_id,))
+    max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 0
+
+    # Строим ключ сортировки: total DESC, wins DESC, затем по тайбрейкерам (место ASC)
+    df["tiebreak_key"] = 0  # чем меньше, тем лучше
+    for tb_heat in range(4, max_heat + 1):
+        tb_results = get_heat_results(stage_id, 1, tb_heat)
+        if tb_results:
+            tb_map = {r["participant_id"]: r["place"] for r in tb_results}
+            # Для каждого тайбрейка добавляем место как вес (умножаем на убывающий коэффициент)
+            col = f"tb_{tb_heat}"
+            df[col] = df["pid"].map(lambda pid, m=tb_map: m.get(pid, 99))
+            # Накапливаем: первый тайбрейк самый приоритетный
+            df["tiebreak_key"] = df["tiebreak_key"] * 100 + df[col]
+
+    df = df.sort_values(["total", "wins", "tiebreak_key"],
+                        ascending=[False, False, True]).reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
+
+    # Определяем наличие ничьих (по total баллам, без учёта тайбрейков)
+    df["has_tie"] = df.duplicated(subset=["total"], keep=False)
+
     return df
+
+
+def detect_final_ties(standings: pd.DataFrame) -> List[List[int]]:
+    """Находит группы участников с одинаковыми очками, которые ещё не разрешены тайбрейком.
+    Возвращает список групп pid'ов с ничьими."""
+    if standings.empty:
+        return []
+    tied_groups = []
+    for total_val, group in standings.groupby("total"):
+        if len(group) > 1:
+            # Проверяем, разрешена ли ничья тайбрейком
+            if "tiebreak_key" in group.columns:
+                tb_keys = group["tiebreak_key"].tolist()
+                if len(set(tb_keys)) == len(tb_keys):
+                    continue  # Все тайбрейки разные — ничья разрешена
+            tied_groups.append(group["pid"].tolist())
+    return tied_groups
 
 
 def check_stage_results_complete(stage_id: int, stage_def: StageDef) -> Tuple[bool, str]:
@@ -1413,13 +1454,19 @@ with tabs[3]:
                     final_sd = bracket[cur_idx]
                     final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd)
                     if final_ok:
-                        st.divider()
-                        if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
-                            exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
-                            exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
-                            st.success("🏆 Турнир завершён!")
-                            st.balloons()
-                            st.rerun()
+                        fin_standings = compute_final_standings(int(active["id"]))
+                        fin_ties = detect_final_ties(fin_standings) if not fin_standings.empty else []
+                        if fin_ties:
+                            st.divider()
+                            st.warning("⚠️ В финале есть ничья — перейдите на вкладку 'Финал' для проведения доп. вылета.")
+                        else:
+                            st.divider()
+                            if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
+                                exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
+                                exec_sql("UPDATE tournaments SET status='finished' WHERE id=?", (tournament_id,))
+                                st.success("🏆 Турнир завершён!")
+                                st.balloons()
+                                st.rerun()
 
         if not all_stages.empty:
             st.caption("🟢 Зелёный = проходит | 🔴 Красный = выбывает")
@@ -1652,8 +1699,93 @@ with tabs[5]:
                     else:
                         st.write(f"{icon} **{name}** — {total} оч. ({pts}{bonus_str}, {wins} поб.)")
 
-                # Завершение турнира
-                if int(standings.iloc[0].get("heats_played", 0)) >= 3:
+                # Проверяем ничьи
+                tied_groups = detect_final_ties(standings)
+                has_basic_3 = int(standings.iloc[0].get("heats_played", 0)) >= 3
+
+                if has_basic_3 and tied_groups:
+                    # Есть неразрешённые ничьи — нужен тайбрейк
+                    st.divider()
+                    st.error("⚠️ **Обнаружена ничья!** Необходим дополнительный вылет для определения мест.")
+
+                    # Определяем номер следующего тайбрейка
+                    group_id = int(qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1",
+                                       (stage_id,)).iloc[0]["id"])
+                    max_heat_df = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?", (group_id,))
+                    max_heat = int(max_heat_df.iloc[0]["mx"]) if not max_heat_df.empty and max_heat_df.iloc[0]["mx"] is not None else 3
+                    next_tb = max_heat + 1
+
+                    # Показываем кто в ничьей
+                    for tg in tied_groups:
+                        tied_names = standings[standings["pid"].isin(tg)]["name"].tolist()
+                        tied_total = int(standings[standings["pid"].isin(tg)].iloc[0]["total"])
+                        st.warning(f"🤝 Ничья ({tied_total} оч.): **{', '.join(tied_names)}**")
+
+                    # Все участники с ничьей участвуют в тайбрейке
+                    all_tied_pids = []
+                    for tg in tied_groups:
+                        all_tied_pids.extend(tg)
+
+                    st.markdown(f"### 🔄 Дополнительный вылет #{next_tb - 3}")
+                    st.caption("Участвуют только пилоты с одинаковым количеством очков. Результат определит итоговые места.")
+
+                    existing_tb = get_heat_results(stage_id, 1, next_tb)
+                    existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+
+                    tb_results = []
+                    for tpid in all_tied_pids:
+                        prow = standings[standings["pid"] == tpid].iloc[0]
+                        pname = prow["name"]
+                        ex = existing_tb_map.get(tpid, {})
+
+                        with st.container(border=True):
+                            st.markdown(f"**{pname}**")
+                            c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+                            with c1:
+                                ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
+                                tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
+                                                       value=ex_time, step=0.001,
+                                                       key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
+                            with c2:
+                                ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
+                                lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                                       value=ex_laps, step=0.1,
+                                                       key=f"tb_l_{next_tb}_{tpid}", format="%.1f")
+                            with c3:
+                                ex_all = bool(ex.get("completed_all_laps", 0))
+                                aval = st.checkbox("Все круги", value=ex_all, key=f"tb_a_{next_tb}_{tpid}",
+                                                   help="Отметьте, если пилот прошёл все круги за отведённое время")
+                            with c4:
+                                if tval > 0 and lval > 0:
+                                    proj = tval if aval else calc_projected_time(tval, lval, total_laps)
+                                    st.metric("Расчётное", format_time(proj))
+
+                        if tval > 0:
+                            tb_results.append({
+                                "pid": tpid, "time_seconds": tval,
+                                "laps_completed": lval, "completed_all_laps": aval
+                            })
+
+                    if st.button(f"💾 Сохранить доп. вылет #{next_tb - 3}", type="primary",
+                                 use_container_width=True, key=f"tb_save_{next_tb}"):
+                        if len(tb_results) == len(all_tied_pids):
+                            # Сохраняем тайбрейк (без начисления финальных очков)
+                            save_heat(stage_id, 1, next_tb, tb_results, is_final=False)
+                            st.success("Сохранено! Проверьте итоговую таблицу.")
+                            st.rerun()
+                        else:
+                            st.error("Введите результаты для всех участников тайбрейка!")
+
+                    # Показываем результаты тайбрейка если есть
+                    if existing_tb:
+                        st.markdown(f"**Результаты доп. вылета #{next_tb - 3}:**")
+                        tdata = [{"М": r["place"], "Пилот": r["name"],
+                                  "Время": format_time(r.get("time_seconds")),
+                                  "Круги": r.get("laps_completed", "—")} for r in existing_tb]
+                        st.dataframe(pd.DataFrame(tdata), use_container_width=True, hide_index=True)
+
+                elif has_basic_3 and not tied_groups:
+                    # Нет ничьих — можно завершать
                     st.divider()
                     if t_status != "finished":
                         if st.button("🏆 Завершить турнир", type="primary", use_container_width=True, key="finish_tournament"):
