@@ -1352,14 +1352,17 @@ with tabs[3]:
                                 tdata.append({
                                     "М": r["place"],
                                     "Пилот": r["name"],
-                                    "Время": format_time(r["time_seconds"]),
+                                    "Время": format_time(r.get("time_seconds")),
+                                    "Круги": r.get("laps_completed", "—"),
+                                    "Все": "✅" if r.get("completed_all_laps") else "—",
+                                    "Расч.": format_time(r.get("projected_time")),
                                 })
                             df_d = pd.DataFrame(tdata)
                             styled = style_standings_table(df_d, sd.qualifiers)
                             st.dataframe(styled, use_container_width=True, hide_index=True,
                                          height=35 + 35 * len(tdata))
                         elif not members.empty:
-                            tdata = [{"М": i + 1, "Пилот": r["name"], "Время": "—"}
+                            tdata = [{"М": i + 1, "Пилот": r["name"], "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
                                      for i, (_, r) in enumerate(members.iterrows())]
                             st.dataframe(pd.DataFrame(tdata), use_container_width=True,
                                          hide_index=True, height=35 + 35 * len(tdata))
@@ -1369,7 +1372,8 @@ with tabs[3]:
                     st.caption("⏳ Ожидает")
                     for gno in range(1, sd.group_count + 1):
                         st.markdown(f"**{T('group')} {gno}**")
-                        tdata = [{"М": i + 1, "Пилот": "—", "Время": "—"} for i in range(sd.group_size)]
+                        tdata = [{"М": i + 1, "Пилот": "—", "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
+                                 for i in range(sd.group_size)]
                         st.dataframe(pd.DataFrame(tdata), use_container_width=True,
                                      hide_index=True, height=35 + 35 * sd.group_size)
 
