@@ -1012,30 +1012,19 @@ with tabs[1]:
                     st.rerun()
 
         st.divider()
-        st.markdown(f"### {T('demo_fill')}")
-        st.caption(T("demo_hint"))
-        n_demo = st.number_input(T("demo_count"), min_value=4, max_value=64, value=16, step=1)
-        prefix = st.text_input(T("demo_prefix"), value="Пилот")
-        if st.button(T("demo_add")):
-            if participant_count(tournament_id) > 0:
-                st.warning(T("demo_already"))
-            else:
-                rows = [(tournament_id, f"{prefix} {i}") for i in range(1, int(n_demo) + 1)]
-                exec_many("INSERT INTO participants(tournament_id, name) VALUES(?,?)", rows)
-                st.success(f'{T("demo_added")}: {n_demo}')
-                st.rerun()
-
-        st.divider()
         st.markdown(f"### {T('random_draw')}")
-        if st.button(T("random_draw"), type="primary"):
-            pdf = qdf("SELECT id FROM participants WHERE tournament_id=?", (tournament_id,))
-            if pdf.empty:
-                st.warning("Нет участников")
-            else:
-                has_numbers = qdf("SELECT COUNT(*) as c FROM participants WHERE tournament_id=? AND start_number IS NOT NULL",
-                                  (tournament_id,)).iloc[0]["c"]
-                if int(has_numbers) > 0:
-                    st.warning(T("draw_already"))
+
+        # Проверяем, была ли уже проведена жеребьёвка
+        has_numbers = int(qdf("SELECT COUNT(*) as c FROM participants WHERE tournament_id=? AND start_number IS NOT NULL",
+                              (tournament_id,)).iloc[0]["c"])
+        draw_done = has_numbers > 0
+
+        if not draw_done:
+            # Первая жеребьёвка — простая кнопка
+            if st.button(T("random_draw"), type="primary"):
+                pdf = qdf("SELECT id FROM participants WHERE tournament_id=?", (tournament_id,))
+                if pdf.empty:
+                    st.warning("Нет участников")
                 else:
                     ids = pdf["id"].tolist()
                     random.shuffle(ids)
@@ -1044,6 +1033,47 @@ with tabs[1]:
                     exec_sql("UPDATE tournaments SET status='qualification' WHERE id=?", (tournament_id,))
                     st.success(T("draw_done"))
                     st.balloons()
+                    st.rerun()
+        else:
+            st.success("✅ Жеребьёвка проведена")
+            # Повторная жеребьёвка — с двойным подтверждением
+            redraw_key = "confirm_redraw"
+            if not st.session_state.get(redraw_key, False):
+                if st.button("🔄 Провести жеребьёвку ещё раз"):
+                    st.session_state[redraw_key] = True
+                    st.rerun()
+            else:
+                st.warning("⚠️ Вы уверены? Все текущие стартовые номера будут перемешаны заново.")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("✅ Да, перемешать", type="primary", use_container_width=True):
+                        pdf = qdf("SELECT id FROM participants WHERE tournament_id=?", (tournament_id,))
+                        ids = pdf["id"].tolist()
+                        random.shuffle(ids)
+                        for idx, pid in enumerate(ids):
+                            exec_sql("UPDATE participants SET start_number=? WHERE id=?", (idx + 1, pid))
+                        st.session_state[redraw_key] = False
+                        st.success(T("draw_done"))
+                        st.balloons()
+                        st.rerun()
+                with cc2:
+                    if st.button("❌ Отмена", use_container_width=True):
+                        st.session_state[redraw_key] = False
+                        st.rerun()
+
+        # --- Инструменты разработчика (скрыты) ---
+        st.divider()
+        with st.expander("🛠️ Инструменты разработчика", expanded=False):
+            st.caption(T("demo_hint"))
+            n_demo = st.number_input(T("demo_count"), min_value=4, max_value=64, value=16, step=1)
+            prefix = st.text_input(T("demo_prefix"), value="Пилот")
+            if st.button(T("demo_add")):
+                if participant_count(tournament_id) > 0:
+                    st.warning(T("demo_already"))
+                else:
+                    rows = [(tournament_id, f"{prefix} {i}") for i in range(1, int(n_demo) + 1)]
+                    exec_many("INSERT INTO participants(tournament_id, name) VALUES(?,?)", rows)
+                    st.success(f'{T("demo_added")}: {n_demo}')
                     st.rerun()
 
     with col2:
