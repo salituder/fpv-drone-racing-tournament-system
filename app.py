@@ -1470,7 +1470,8 @@ def export_tournament_excel(tournament_id: int) -> bytes:
             is_final_stage = sd.code == "F"
 
             # Безопасное имя листа (макс 31 символ)
-            sheet_name = sname[:31]
+            # Excel не допускает символы / \ ? * [ ] : в названии листа
+            sheet_name = sname.replace("/", "-").replace("\\", "-").replace("?", "").replace("*", "").replace("[", "(").replace("]", ")").replace(":", "-")[:31]
             ws_stage = wb.create_sheet(sheet_name)
             current_row = 1
 
