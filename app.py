@@ -1027,10 +1027,14 @@ def resolve_sim_tiebreaker(stage_id: int, group_no: int, scoring_mode: str) -> p
     if not tb_results:
         return ranking
 
-    # Создаём ключ для тайбрейка: кто лучше в тайбрейке — тот выше при равных очках
+    # Победитель тайбрейка (1-е место) получает +1 очко
     tb_rank = {r["participant_id"]: r["place"] for r in tb_results}
+    for i, row in ranking.iterrows():
+        pid = int(row[pid_col])
+        if tb_rank.get(pid) == 1:
+            ranking.at[i, "total_points"] = int(row["total_points"]) + 1
 
-    # Добавляем тайбрейк-ключ для сортировки
+    # Пересортируем и при равных очках — по месту в тайбрейке
     ranking["tiebreak"] = ranking[pid_col].map(lambda x: tb_rank.get(int(x), 999))
     ranking = ranking.sort_values(["total_points", "tiebreak"], ascending=[False, True]).reset_index(drop=True)
     ranking["rank"] = range(1, len(ranking) + 1)
