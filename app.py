@@ -699,6 +699,31 @@ def compute_final_standings(stage_id: int) -> pd.DataFrame:
     return df
 
 
+def check_stage_results_complete(stage_id: int, stage_def: StageDef) -> Tuple[bool, str]:
+    """Проверяет, все ли результаты заполнены для текущего этапа.
+    Возвращает (ok, message)."""
+    all_groups = get_all_groups(stage_id)
+    if not all_groups:
+        return False, "Нет групп в этом этапе"
+
+    heats_needed = stage_def.heats_count  # 1 для плей-офф, 3 для финала
+    missing = []
+    for gno, members in all_groups.items():
+        if members.empty:
+            missing.append(f"Группа {gno}: нет участников")
+            continue
+        for h in range(1, heats_needed + 1):
+            results = get_heat_results(stage_id, gno, h)
+            if not results:
+                if heats_needed > 1:
+                    missing.append(f"Группа {gno}, вылет {h}: нет результатов")
+                else:
+                    missing.append(f"Группа {gno}: нет результатов")
+    if missing:
+        return False, "Не все результаты заполнены:\n" + "\n".join(missing)
+    return True, ""
+
+
 def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
     """Переход к следующему этапу плей-офф."""
     stages_df = get_all_stages(tournament_id)
@@ -710,6 +735,12 @@ def advance_to_next_stage(tournament_id: int, bracket: List[StageDef]):
     next_idx = cur_idx + 1
     if next_idx >= len(bracket):
         return
+
+    # Валидация: проверить, что все результаты текущего этапа заполнены
+    cur_sd = bracket[cur_idx]
+    ok, msg = check_stage_results_complete(int(cur["id"]), cur_sd)
+    if not ok:
+        raise ValueError(msg)
 
     next_sd = bracket[next_idx]
     next_stage_id = create_stage(tournament_id, next_idx, next_sd)
@@ -1225,10 +1256,32 @@ with tabs[2]:
                 if filled < total_p:
                     st.warning(f"Результаты введены: {filled} из {total_p}")
 
-                if st.button(T("qual_finish"), type="primary", use_container_width=True):
-                    if filled == 0:
-                        st.error(T("qual_not_all"))
+                if filled < total_p:
+                    # Не все результаты — нужно двойное подтверждение
+                    confirm_qual_key = "confirm_qual_finish"
+                    if not st.session_state.get(confirm_qual_key, False):
+                        if st.button(T("qual_finish"), type="primary", use_container_width=True):
+                            if filled == 0:
+                                st.error(T("qual_not_all"))
+                            else:
+                                st.session_state[confirm_qual_key] = True
+                                st.rerun()
                     else:
+                        st.warning(f"⚠️ Заполнено {filled} из {total_p} результатов. Продолжить?")
+                        qc1, qc2 = st.columns(2)
+                        with qc1:
+                            if st.button("✅ Да, завершить квалификацию", type="primary", use_container_width=True):
+                                st.session_state[confirm_qual_key] = False
+                                start_bracket(tournament_id)
+                                st.success(T("qual_done"))
+                                st.balloons()
+                                st.rerun()
+                        with qc2:
+                            if st.button("❌ Отмена", use_container_width=True):
+                                st.session_state[confirm_qual_key] = False
+                                st.rerun()
+                else:
+                    if st.button(T("qual_finish"), type="primary", use_container_width=True):
                         start_bracket(tournament_id)
                         st.success(T("qual_done"))
                         st.balloons()
@@ -1338,8 +1391,9 @@ with tabs[3]:
                             st.error(str(e))
                 elif bracket[cur_idx].code == "F":
                     # Финал завершён?
-                    standings = compute_final_standings(int(active["id"]))
-                    if not standings.empty and int(standings.iloc[0].get("heats_played", 0)) >= 3:
+                    final_sd = bracket[cur_idx]
+                    final_ok, final_msg = check_stage_results_complete(int(active["id"]), final_sd)
+                    if final_ok:
                         st.divider()
                         if st.button("🏆 Завершить турнир", type="primary", use_container_width=True):
                             exec_sql("UPDATE stages SET status='done' WHERE id=?", (int(active["id"]),))
