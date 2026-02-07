@@ -866,6 +866,22 @@ def style_standings_table(df: pd.DataFrame, qualifiers: int):
     return df.style.apply(highlight_row, axis=1)
 
 
+def style_final_podium(df: pd.DataFrame):
+    """Подсветка финальной таблицы: золото, серебро, бронза."""
+    MEDAL_COLORS = {
+        1: "background-color: #5C4B00; color: #FFD700",   # Золото
+        2: "background-color: #3A3A3A; color: #C0C0C0",   # Серебро
+        3: "background-color: #3D2B1F; color: #CD7F32",   # Бронза
+    }
+
+    def highlight_row(row):
+        rank = row["М"]
+        if rank in MEDAL_COLORS:
+            return [MEDAL_COLORS[rank]] * len(row)
+        return [""] * len(row)
+    return df.style.apply(highlight_row, axis=1)
+
+
 def download_csv_button(df: pd.DataFrame, label: str, filename: str):
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(label, data=csv, file_name=filename, mime="text/csv")
@@ -1396,42 +1412,84 @@ with tabs[3]:
                         st.caption("✓ Завершён")
 
                     all_groups = get_all_groups(stage_id)
-                    for gno in sorted(all_groups.keys()):
-                        members = all_groups[gno]
-                        st.markdown(f"**{T('group')} {gno}**")
 
-                        # Если есть результаты — показываем ранжирование
-                        results = get_heat_results(stage_id, gno, 1)
-                        if results:
+                    # Финал — особое отображение с очками
+                    if sd.code == "F":
+                        fin_standings = compute_final_standings(stage_id)
+                        if not fin_standings.empty and int(fin_standings.iloc[0].get("heats_played", 0)) > 0:
+                            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
                             tdata = []
-                            for r in results:
+                            for _, fr in fin_standings.iterrows():
+                                rank = int(fr["rank"])
+                                medal = medals.get(rank, "")
+                                bonus_str = "+1" if int(fr["bonus"]) > 0 else ""
                                 tdata.append({
-                                    "М": r["place"],
-                                    "Пилот": r["name"],
-                                    "Время": format_time(r.get("time_seconds")),
-                                    "Круги": r.get("laps_completed", "—"),
-                                    "Все": "✅" if r.get("completed_all_laps") else "—",
-                                    "Расч.": format_time(r.get("projected_time")),
+                                    "М": rank,
+                                    "": medal,
+                                    "Пилот": fr["name"],
+                                    "Очки": int(fr["total"]),
+                                    "Баллы": int(fr["total_points"]),
+                                    "Бонус": bonus_str,
+                                    "Побед": int(fr["wins"]),
                                 })
                             df_d = pd.DataFrame(tdata)
-                            styled = style_standings_table(df_d, sd.qualifiers)
+                            styled = style_final_podium(df_d)
                             st.dataframe(styled, use_container_width=True, hide_index=True,
                                          height=35 + 35 * len(tdata))
-                        elif not members.empty:
-                            tdata = [{"М": i + 1, "Пилот": r["name"], "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
-                                     for i, (_, r) in enumerate(members.iterrows())]
-                            st.dataframe(pd.DataFrame(tdata), use_container_width=True,
-                                         hide_index=True, height=35 + 35 * len(tdata))
                         else:
-                            st.caption("⏳ Ожидает")
+                            # Финал ещё не начался — показать участников
+                            for gno in sorted(all_groups.keys()):
+                                members = all_groups[gno]
+                                if not members.empty:
+                                    tdata = [{"М": i + 1, "Пилот": r["name"], "Очки": "—", "Побед": "—"}
+                                             for i, (_, r) in enumerate(members.iterrows())]
+                                    st.dataframe(pd.DataFrame(tdata), use_container_width=True,
+                                                 hide_index=True, height=35 + 35 * len(tdata))
+                                else:
+                                    st.caption("⏳ Ожидает")
+                    else:
+                        # Обычный плей-офф этап
+                        for gno in sorted(all_groups.keys()):
+                            members = all_groups[gno]
+                            st.markdown(f"**{T('group')} {gno}**")
+
+                            results = get_heat_results(stage_id, gno, 1)
+                            if results:
+                                tdata = []
+                                for r in results:
+                                    tdata.append({
+                                        "М": r["place"],
+                                        "Пилот": r["name"],
+                                        "Время": format_time(r.get("time_seconds")),
+                                        "Круги": r.get("laps_completed", "—"),
+                                        "Все": "✅" if r.get("completed_all_laps") else "—",
+                                        "Расч.": format_time(r.get("projected_time")),
+                                    })
+                                df_d = pd.DataFrame(tdata)
+                                styled = style_standings_table(df_d, sd.qualifiers)
+                                st.dataframe(styled, use_container_width=True, hide_index=True,
+                                             height=35 + 35 * len(tdata))
+                            elif not members.empty:
+                                tdata = [{"М": i + 1, "Пилот": r["name"], "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
+                                         for i, (_, r) in enumerate(members.iterrows())]
+                                st.dataframe(pd.DataFrame(tdata), use_container_width=True,
+                                             hide_index=True, height=35 + 35 * len(tdata))
+                            else:
+                                st.caption("⏳ Ожидает")
                 else:
                     st.caption("⏳ Ожидает")
-                    for gno in range(1, sd.group_count + 1):
-                        st.markdown(f"**{T('group')} {gno}**")
-                        tdata = [{"М": i + 1, "Пилот": "—", "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
+                    if sd.code == "F":
+                        tdata = [{"М": i + 1, "Пилот": "—", "Очки": "—", "Побед": "—"}
                                  for i in range(sd.group_size)]
                         st.dataframe(pd.DataFrame(tdata), use_container_width=True,
                                      hide_index=True, height=35 + 35 * sd.group_size)
+                    else:
+                        for gno in range(1, sd.group_count + 1):
+                            st.markdown(f"**{T('group')} {gno}**")
+                            tdata = [{"М": i + 1, "Пилот": "—", "Время": "—", "Круги": "—", "Все": "—", "Расч.": "—"}
+                                     for i in range(sd.group_size)]
+                            st.dataframe(pd.DataFrame(tdata), use_container_width=True,
+                                         hide_index=True, height=35 + 35 * sd.group_size)
 
         # Кнопка перехода
         if t_status == "bracket":
