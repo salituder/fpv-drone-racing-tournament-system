@@ -256,8 +256,6 @@ I18N = {
         "bonus_note": "Бонус +1 за 2 и более побед в вылетах",
 
         # Симулятор
-        "scoring_mode": "Режим подсчёта очков",
-        "scoring_mode_hint": "Определяет как подсчитываются очки в групповом и финальном этапах",
         "track": "Трасса",
         "track_n": "Трасса {}",
         "attempt_n": "Попытка {}",
@@ -355,8 +353,6 @@ I18N = {
         "champion": "🏆 CHAMPION",
         "bonus_note": "Bonus +1 for 2+ first-place finishes",
 
-        "scoring_mode": "Scoring mode",
-        "scoring_mode_hint": "Determines how points are calculated in group and final stages",
         "track": "Track",
         "track_n": "Track {}",
         "attempt_n": "Attempt {}",
@@ -429,34 +425,8 @@ PROGRESS_1_2_TO_FINAL: Dict[int, List[Tuple[int, int]]] = {
 FINAL_SCORING = {1: 3, 2: 2, 3: 1, 4: 0}
 
 # Очки группового/финального этапа (симулятор)
+# 4 пилота летят одновременно, 2 трассы × 3 попытки = 6 вылетов, сумма очков. Макс 24.
 SIM_SCORING = {1: 4, 2: 3, 3: 2, 4: 1}  # 0 для DNF (не в словаре)
-
-# Режимы подсчёта для симулятора
-SCORING_MODES = {
-    "sum_all": {
-        "RU": "Сумма всех вылетов (6 вылетов, макс. 24 оч.)",
-        "EN": "Sum of all heats (6 heats, max 24 pts)",
-        "RU_desc": "Все 4 пилота летят одновременно в каждом из 6 вылетов (2 трассы × 3 попытки). "
-                   "За каждый вылет начисляются очки: 1м=4, 2м=3, 3м=2, 4м=1, DNF=0. "
-                   "Итого суммируются очки за все 6 вылетов. Максимум: 24 очка.",
-    },
-    "best_time_per_track": {
-        "RU": "Лучшее время на трассе → очки (макс. 8 оч.)",
-        "EN": "Best time per track → points (max 8 pts)",
-        "RU_desc": "Каждый пилот делает 3 попытки на каждой трассе индивидуально. "
-                   "Засчитывается лучшее время из 3 попыток на каждой трассе. "
-                   "По лучшему времени — ранжирование и начисление очков (1м=4, 2м=3, 3м=2, 4м=1). "
-                   "Итого: очки за трассу 1 + очки за трассу 2. Максимум: 8 очков.",
-    },
-    "best_heat_per_track": {
-        "RU": "Лучший вылет на трассе → очки (макс. 8 оч.)",
-        "EN": "Best heat per track → points (max 8 pts)",
-        "RU_desc": "Все 4 пилота летят одновременно в каждом вылете. "
-                   "За каждый вылет начисляются очки (1м=4, 2м=3, 3м=2, 4м=1, DNF=0). "
-                   "На каждой трассе засчитывается только лучший вылет из трёх. "
-                   "Итого: лучшие очки за трассу 1 + лучшие очки за трассу 2. Максимум: 8 очков.",
-    },
-}
 
 
 # ============================================================
@@ -959,9 +929,9 @@ def detect_final_ties(standings: pd.DataFrame) -> List[List[int]]:
     return tied_groups
 
 
-def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str) -> pd.DataFrame:
+def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str = "sum_all") -> pd.DataFrame:
     """Ранжирование в группе для симулятора (2 трассы × 3 попытки).
-    scoring_mode: 'sum_all', 'best_time_per_track', 'best_heat_per_track'."""
+    Сумма очков за все 6 вылетов. Макс 24 очка."""
     gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id, group_no))
     if gid_df.empty:
         return pd.DataFrame()
@@ -971,97 +941,22 @@ def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str) -
     if members.empty:
         return pd.DataFrame()
 
-    if scoring_mode == "sum_all":
-        # Вариант A: сумма очков за все 6 вылетов
-        df = qdf("""
-            SELECT hr.participant_id, p.name, p.start_number,
-                   COALESCE(SUM(hr.points), 0) as total_points,
-                   COUNT(hr.heat_id) as heats_played
-            FROM heat_results hr
-            JOIN heats h ON h.id=hr.heat_id
-            JOIN participants p ON p.id=hr.participant_id
-            WHERE h.group_id=?
-            GROUP BY hr.participant_id
-        """, (group_id,))
-        if df.empty:
-            return pd.DataFrame()
-        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
-        df["rank"] = range(1, len(df) + 1)
-        return df
-
-    elif scoring_mode == "best_time_per_track":
-        # Вариант B: лучшее время на каждой трассе → ранжирование → очки
-        rows = []
-        for _, m in members.iterrows():
-            pid = int(m["pid"])
-            total_pts = 0
-            for track in [1, 2]:
-                best_time = qdf("""
-                    SELECT MIN(hr.time_seconds) as best
-                    FROM heat_results hr
-                    JOIN heats h ON h.id=hr.heat_id
-                    WHERE h.group_id=? AND h.track_no=? AND hr.participant_id=?
-                          AND hr.time_seconds > 0
-                """, (group_id, track, pid))
-                bt = float(best_time.iloc[0]["best"]) if not best_time.empty and best_time.iloc[0]["best"] is not None else 9999.0
-                rows.append({"pid": pid, "name": m["name"], "start_number": m["start_number"],
-                             "track": track, "best_time": bt})
-
-        if not rows:
-            return pd.DataFrame()
-        rdf = pd.DataFrame(rows)
-        # Для каждой трассы ранжируем по времени и присваиваем очки
-        pts_by_pid = {}
-        for track in [1, 2]:
-            tdf = rdf[rdf["track"] == track].sort_values("best_time").reset_index(drop=True)
-            # Если ни у кого нет реальных результатов на этой трассе — пропускаем
-            if all(t >= 9999.0 for t in tdf["best_time"]):
-                continue
-            for i, row in tdf.iterrows():
-                pid = int(row["pid"])
-                # Не давать очки пилотам без результатов (время = 9999)
-                if float(row["best_time"]) >= 9999.0:
-                    continue
-                place = i + 1
-                pts = SIM_SCORING.get(place, 0)
-                pts_by_pid[pid] = pts_by_pid.get(pid, 0) + pts
-
-        result = []
-        for _, m in members.iterrows():
-            pid = int(m["pid"])
-            result.append({"participant_id": pid, "name": m["name"], "start_number": m["start_number"],
-                           "total_points": pts_by_pid.get(pid, 0)})
-        df = pd.DataFrame(result)
-        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
-        df["rank"] = range(1, len(df) + 1)
-        return df
-
-    elif scoring_mode == "best_heat_per_track":
-        # Вариант C: лучшие очки из одного вылета на каждой трассе
-        rows = []
-        for _, m in members.iterrows():
-            pid = int(m["pid"])
-            total_pts = 0
-            for track in [1, 2]:
-                best_pts = qdf("""
-                    SELECT MAX(hr.points) as best
-                    FROM heat_results hr
-                    JOIN heats h ON h.id=hr.heat_id
-                    WHERE h.group_id=? AND h.track_no=? AND hr.participant_id=?
-                """, (group_id, track, pid))
-                bp = int(best_pts.iloc[0]["best"]) if not best_pts.empty and best_pts.iloc[0]["best"] is not None else 0
-                total_pts += bp
-            rows.append({"participant_id": pid, "name": m["name"], "start_number": m["start_number"],
-                         "total_points": total_pts})
-
-        if not rows:
-            return pd.DataFrame()
-        df = pd.DataFrame(rows)
-        df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
-        df["rank"] = range(1, len(df) + 1)
-        return df
-
-    return pd.DataFrame()
+    # Сумма очков за все вылеты (исключая тайбрейки track_no=99)
+    df = qdf("""
+        SELECT hr.participant_id, p.name, p.start_number,
+               COALESCE(SUM(hr.points), 0) as total_points,
+               COUNT(hr.heat_id) as heats_played
+        FROM heat_results hr
+        JOIN heats h ON h.id=hr.heat_id
+        JOIN participants p ON p.id=hr.participant_id
+        WHERE h.group_id=? AND h.track_no < 99
+        GROUP BY hr.participant_id
+    """, (group_id,))
+    if df.empty:
+        return pd.DataFrame()
+    df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
+    df["rank"] = range(1, len(df) + 1)
+    return df
 
 
 def get_sim_track_bests(stage_id: int, group_no: int) -> Dict[int, Dict]:
@@ -1443,21 +1338,11 @@ with st.sidebar:
         time_limit = st.number_input(T("time_limit"), value=default_time, min_value=10.0, step=5.0)
         total_laps = st.number_input(T("total_laps"), value=default_laps, min_value=1, step=1)
 
-        # Режим подсчёта для симулятора
-        scoring_mode_val = "none"
+        # Для симулятора — автоматически sum_all
+        scoring_mode_val = "sum_all" if disc_key == "sim_individual" else "none"
         if disc_key == "sim_individual":
-            st.markdown(f"**{T('scoring_mode')}**")
-            sm_options = list(SCORING_MODES.keys())
-            sm_labels = {k: SCORING_MODES[k].get(lang, SCORING_MODES[k]["RU"]) for k in sm_options}
-            scoring_mode_val = st.selectbox(
-                T("scoring_mode_hint"),
-                sm_options,
-                format_func=lambda k: sm_labels[k],
-                key="create_scoring_mode"
-            )
-            # Подробное описание
-            desc_key = "RU_desc" if lang == "RU" else "RU_desc"
-            st.caption(SCORING_MODES[scoring_mode_val].get(desc_key, ""))
+            st.caption("📊 Подсчёт: сумма очков за 6 вылетов (2 трассы × 3 попытки). "
+                       "Очки: 1м=4, 2м=3, 3м=2, 4м=1, DNF=0. Макс 24 очка.")
 
         if st.button(T("create_tournament"), type="primary"):
             exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode, status, created_at)
@@ -1489,9 +1374,8 @@ is_sim = discipline == "sim_individual"
 with st.sidebar:
     st.caption(f"📋 {DISCIPLINES.get(discipline, discipline)}")
     st.caption(f"⏱️ {time_limit}с / {total_laps} кр.")
-    if is_sim and scoring_mode != "none":
-        sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode)
-        st.caption(f"📊 {sm_label}")
+    if is_sim:
+        st.caption("📊 Сумма очков за 6 вылетов")
     st.caption(f"👥 {p_count} участников")
 
 # Проверка дисциплины
@@ -2131,9 +2015,7 @@ with tabs[4]:
             elif is_sim:
                 # ========== СИМУЛЯТОР: 2 трассы × 3 попытки ==========
                 st.success(f"🔥 Сейчас: **{sname}**")
-                sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode) if scoring_mode != "none" else ""
-                if sm_label:
-                    st.caption(f"📊 Режим подсчёта: {sm_label}")
+                st.caption("📊 Сумма очков за 6 вылетов (2 трассы × 3 попытки, макс. 24 оч.)")
 
                 all_groups = get_all_groups(stage_id)
 
@@ -2460,8 +2342,7 @@ with tabs[5]:
             else:
                 st.success(f"🏆 Финалисты: {', '.join(members['name'].tolist())}")
 
-            sm_label = SCORING_MODES.get(scoring_mode, {}).get(lang, scoring_mode)
-            st.caption(f"📊 Режим подсчёта: {sm_label}")
+            st.caption("📊 Сумма очков за 6 вылетов (2 трассы × 3 попытки, макс. 24 оч.)")
 
             # Ввод результатов по трасса/попытка
             if not is_finished:
