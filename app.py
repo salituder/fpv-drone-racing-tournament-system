@@ -45,17 +45,23 @@ BASE_CSS = """
 /* Bracket tree */
 .bracket-container {
     display: flex;
-    align-items: stretch;
+    align-items: center;
     gap: 0;
     overflow-x: auto;
     padding: 20px 0;
+}
+.bracket-stage-wrapper {
+    display: flex;
+    align-items: center;
 }
 .bracket-round {
     display: flex;
     flex-direction: column;
     justify-content: center;
-    min-width: 200px;
+    min-width: 280px;
+    max-width: 320px;
     position: relative;
+    flex-shrink: 0;
 }
 .bracket-round-title {
     text-align: center;
@@ -83,23 +89,25 @@ BASE_CSS = """
     background: #1e1e1e;
     border: 1px solid #444;
     border-radius: 8px;
-    margin: 8px 4px;
-    padding: 8px;
+    margin: 6px 0;
+    padding: 8px 10px;
     position: relative;
 }
 .bracket-group-title {
-    font-size: 0.75em;
+    font-size: 0.78em;
     color: #888;
     margin-bottom: 4px;
     text-align: center;
+    font-weight: 600;
 }
 .bracket-player {
     display: flex;
     justify-content: space-between;
-    padding: 3px 6px;
-    font-size: 0.82em;
+    padding: 4px 8px;
+    font-size: 0.85em;
     border-radius: 4px;
-    margin: 1px 0;
+    margin: 2px 0;
+    gap: 12px;
 }
 .bracket-player.advancing {
     background: #1a3a1a;
@@ -129,18 +137,26 @@ BASE_CSS = """
     display: flex;
     flex-direction: column;
     justify-content: center;
-    width: 30px;
-    min-width: 30px;
-    position: relative;
+    width: 50px;
+    min-width: 50px;
+    flex-shrink: 0;
+    align-self: center;
 }
-.connector-line {
-    border-top: 2px solid #555;
-    width: 100%;
+.bracket-connector-inner {
+    display: flex;
+    flex-direction: column;
 }
-.connector-vert {
+.bracket-connector-inner .conn-top {
     border-right: 2px solid #555;
-    height: 50%;
-    width: 50%;
+    border-top: 2px solid #555;
+    margin-left: 50%;
+    height: 20px;
+}
+.bracket-connector-inner .conn-bottom {
+    border-right: 2px solid #555;
+    border-bottom: 2px solid #555;
+    margin-left: 50%;
+    height: 20px;
 }
 </style>
 """
@@ -1589,8 +1605,10 @@ with tabs[3]:
             # Коннектор между раундами (кроме последнего)
             if idx < len(bracket) - 1:
                 bracket_html += '<div class="bracket-connector">'
-                bracket_html += '<div style="flex:1; border-right: 2px solid #555; border-top: 2px solid #555; margin-left: 50%;"></div>'
-                bracket_html += '<div style="flex:1; border-right: 2px solid #555; border-bottom: 2px solid #555; margin-left: 50%;"></div>'
+                bracket_html += '<div class="bracket-connector-inner">'
+                bracket_html += '<div class="conn-top"></div>'
+                bracket_html += '<div class="conn-bottom"></div>'
+                bracket_html += '</div>'
                 bracket_html += '</div>'
 
         bracket_html += '</div>'
