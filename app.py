@@ -805,7 +805,7 @@ def format_time(seconds: Optional[float]) -> str:
         return "—"
     m = int(seconds) // 60
     s = seconds - m * 60
-    return f"{m}:{s:05.2f}"
+    return f"{m}:{s:06.3f}"
 
 
 def parse_time(time_str: str) -> Optional[float]:
@@ -1176,7 +1176,7 @@ with tabs[2]:
                         existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
                         time_val = st.number_input(
                             f"Время (сек)", min_value=0.0, max_value=999.0,
-                            value=existing_time, step=0.1, key=f"qt_{pid}", format="%.2f")
+                            value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
                     with c2:
                         existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
                         laps_val = st.number_input(
@@ -1184,7 +1184,8 @@ with tabs[2]:
                             value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
                     with c3:
                         existing_all = bool(int(row["completed_all_laps"])) if pd.notna(row["completed_all_laps"]) else False
-                        all_laps = st.checkbox("Все круги", value=existing_all, key=f"qa_{pid}")
+                        all_laps = st.checkbox("Все круги", value=existing_all, key=f"qa_{pid}",
+                                               help="Отметьте, если пилот прошёл все круги за отведённое время")
                     with c4:
                         if time_val > 0 and laps_val > 0:
                             proj = time_val if all_laps else calc_projected_time(time_val, laps_val, total_laps)
