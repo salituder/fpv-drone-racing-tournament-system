@@ -1064,6 +1064,32 @@ def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str) -
     return pd.DataFrame()
 
 
+def get_sim_track_bests(stage_id: int, group_no: int) -> Dict[int, Dict]:
+    """Для каждого пилота в группе — лучшее время на Трассе 1 и Трассе 2.
+    Возвращает {pid: {'t1': best_time_or_None, 't2': best_time_or_None}}."""
+    gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id, group_no))
+    if gid_df.empty:
+        return {}
+    group_id = int(gid_df.iloc[0]["id"])
+    members = get_group_members(stage_id, group_no)
+    result = {}
+    for _, m in members.iterrows():
+        pid = int(m["pid"])
+        bests = {}
+        for track in [1, 2]:
+            bt = qdf("""
+                SELECT MIN(hr.time_seconds) as best
+                FROM heat_results hr
+                JOIN heats h ON h.id=hr.heat_id
+                WHERE h.group_id=? AND h.track_no=? AND hr.participant_id=?
+                      AND hr.time_seconds > 0
+            """, (group_id, track, pid))
+            val = float(bt.iloc[0]["best"]) if not bt.empty and bt.iloc[0]["best"] is not None else None
+            bests[f"t{track}"] = val
+        result[pid] = bests
+    return result
+
+
 def compute_sim_final_standings(stage_id: int, scoring_mode: str) -> pd.DataFrame:
     """Итоги финала симулятора: те же правила, что и групповой этап, но без бонусов."""
     return compute_sim_group_ranking(stage_id, 1, scoring_mode)
@@ -2122,8 +2148,20 @@ with tabs[4]:
                     st.markdown(f"### {T('sim_group_results')}: {T('group')} {group_no}")
                     sim_ranking = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
                     if not sim_ranking.empty:
-                        sim_disp = sim_ranking[["rank", "name", "total_points"]].copy()
-                        sim_disp.columns = ["М", "Пилот", "Очки"]
+                        track_bests = get_sim_track_bests(stage_id, group_no)
+                        pid_col = "participant_id" if "participant_id" in sim_ranking.columns else "pid"
+                        sim_rows = []
+                        for _, sr in sim_ranking.iterrows():
+                            pid = int(sr[pid_col])
+                            tb = track_bests.get(pid, {})
+                            t1 = format_time(tb.get("t1")) if tb.get("t1") else "—"
+                            t2 = format_time(tb.get("t2")) if tb.get("t2") else "—"
+                            sim_rows.append({
+                                "М": int(sr["rank"]), "Пилот": sr["name"],
+                                "Трасса 1": t1, "Трасса 2": t2,
+                                "Очки": int(sr["total_points"]),
+                            })
+                        sim_disp = pd.DataFrame(sim_rows)
                         styled_sim = style_standings_table(sim_disp, sd.qualifiers)
                         st.dataframe(styled_sim, use_container_width=True, hide_index=True)
                         st.caption("🟢 Проходит (топ-2) | 🔴 Выбывает")
@@ -2343,14 +2381,22 @@ with tabs[5]:
 
             sim_standings = compute_sim_final_standings(stage_id, scoring_mode)
             if not sim_standings.empty:
+                track_bests_fin = get_sim_track_bests(stage_id, 1)
+                pid_col_fin = "participant_id" if "participant_id" in sim_standings.columns else "pid"
                 medal_data = []
                 for _, row in sim_standings.iterrows():
                     rank = int(row["rank"])
+                    pid = int(row[pid_col_fin])
+                    tb = track_bests_fin.get(pid, {})
+                    t1 = format_time(tb.get("t1")) if tb.get("t1") else "—"
+                    t2 = format_time(tb.get("t2")) if tb.get("t2") else "—"
                     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
                     medal_data.append({
                         "М": rank,
                         "": medals.get(rank, ""),
                         "Пилот": row["name"],
+                        "Трасса 1": t1,
+                        "Трасса 2": t2,
                         "Очки": int(row["total_points"]),
                     })
                 df_final = pd.DataFrame(medal_data)
