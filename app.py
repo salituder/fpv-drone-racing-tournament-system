@@ -995,8 +995,14 @@ def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str) -
         pts_by_pid = {}
         for track in [1, 2]:
             tdf = rdf[rdf["track"] == track].sort_values("best_time").reset_index(drop=True)
+            # Если ни у кого нет реальных результатов на этой трассе — пропускаем
+            if all(t >= 9999.0 for t in tdf["best_time"]):
+                continue
             for i, row in tdf.iterrows():
                 pid = int(row["pid"])
+                # Не давать очки пилотам без результатов (время = 9999)
+                if float(row["best_time"]) >= 9999.0:
+                    continue
                 place = i + 1
                 pts = SIM_SCORING.get(place, 0)
                 pts_by_pid[pid] = pts_by_pid.get(pid, 0) + pts
