@@ -2863,6 +2863,142 @@ with tabs[3]:
         st.markdown(bracket_html, unsafe_allow_html=True)
         st.caption("🟢 Зелёный = проходит | 🔴 Красный = выбывает | 🥇🥈🥉 Медали финала")
 
+        # --- Drag-and-drop: перемещение участников между группами ---
+        if t_status == "bracket":
+            active_dnd = get_active_stage(tournament_id)
+            if active_dnd is not None:
+                dnd_stage_id = int(active_dnd["id"])
+                dnd_stage_idx = int(active_dnd["stage_idx"])
+                dnd_sd = bracket[dnd_stage_idx]
+                dnd_sname = dnd_sd.display_name.get(lang, dnd_sd.code)
+
+                # Проверяем, есть ли уже результаты для этого этапа
+                dnd_has_results = False
+                dnd_all_groups = get_all_groups(dnd_stage_id)
+                for gno in dnd_all_groups:
+                    if is_sim:
+                        for tr in [1, 2]:
+                            for att in [1, 2, 3]:
+                                if get_heat_results(dnd_stage_id, gno, att, tr):
+                                    dnd_has_results = True
+                                    break
+                            if dnd_has_results:
+                                break
+                    else:
+                        if get_heat_results(dnd_stage_id, gno, 1):
+                            dnd_has_results = True
+                    if dnd_has_results:
+                        break
+
+                if dnd_sd.code != "F" and dnd_all_groups:
+                    st.divider()
+                    with st.expander(f"🔀 Перемещение участников между группами ({dnd_sname})", expanded=False):
+                        if dnd_has_results:
+                            st.warning("🔒 Перемещение недоступно — уже есть введённые результаты для этого этапа. "
+                                       "Удалите результаты или откатите этап, чтобы переместить участников.")
+                        else:
+                            st.caption("Перетащите участников между группами, затем нажмите «Сохранить».")
+
+                            try:
+                                from streamlit_sortables import sort_items
+
+                                # Собираем текущее расположение
+                                original_containers = []
+                                group_id_map = {}  # gno -> group_id в БД
+                                for gno in sorted(dnd_all_groups.keys()):
+                                    members = dnd_all_groups[gno]
+                                    gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?",
+                                                 (dnd_stage_id, gno))
+                                    if not gid_df.empty:
+                                        group_id_map[gno] = int(gid_df.iloc[0]["id"])
+                                    items = []
+                                    for _, r in members.iterrows():
+                                        # Формат: "Имя|pid" — pid скрыт от пользователя визуально
+                                        items.append(f"{r['name']}|{int(r['pid'])}")
+                                    original_containers.append({
+                                        "header": f"Группа {gno}",
+                                        "items": items,
+                                    })
+
+                                # Рендерим drag-and-drop
+                                sorted_containers = sort_items(original_containers, multi_containers=True)
+
+                                # Сравниваем с оригиналом
+                                changed = False
+                                for orig, curr in zip(original_containers, sorted_containers):
+                                    if orig["items"] != curr["items"]:
+                                        changed = True
+                                        break
+
+                                if changed:
+                                    # Валидация размеров
+                                    max_size = dnd_sd.group_size
+                                    valid = True
+                                    for i, container in enumerate(sorted_containers):
+                                        if len(container["items"]) == 0:
+                                            st.error(f"Группа {i+1} не может быть пустой!")
+                                            valid = False
+                                            break
+                                        if len(container["items"]) > max_size:
+                                            st.error(f"Группа {i+1}: максимум {max_size} участников (сейчас {len(container['items'])})!")
+                                            valid = False
+                                            break
+
+                                    if valid:
+                                        st.info("📝 Есть изменения в составе групп.")
+
+                                        # Показываем что изменилось
+                                        for i, (orig, curr) in enumerate(zip(original_containers, sorted_containers)):
+                                            if orig["items"] != curr["items"]:
+                                                orig_names = [x.split("|")[0] for x in orig["items"]]
+                                                curr_names = [x.split("|")[0] for x in curr["items"]]
+                                                added = set(curr_names) - set(orig_names)
+                                                removed = set(orig_names) - set(curr_names)
+                                                gno = i + 1
+                                                if added:
+                                                    st.caption(f"Группа {gno}: + {', '.join(added)}")
+                                                if removed:
+                                                    st.caption(f"Группа {gno}: - {', '.join(removed)}")
+
+                                        confirm_key = "confirm_dnd_save"
+                                        if not st.session_state.get(confirm_key, False):
+                                            if st.button("💾 Сохранить изменения", type="primary",
+                                                         use_container_width=True, key="dnd_save"):
+                                                st.session_state[confirm_key] = True
+                                                st.rerun()
+                                        else:
+                                            st.warning("⚠️ Вы уверены? Состав групп будет изменён.")
+                                            dnd_c1, dnd_c2 = st.columns(2)
+                                            with dnd_c1:
+                                                if st.button("✅ Да, сохранить", type="primary",
+                                                             use_container_width=True, key="dnd_confirm"):
+                                                    # Обновляем group_members
+                                                    group_nos = sorted(dnd_all_groups.keys())
+                                                    for i, container in enumerate(sorted_containers):
+                                                        gno = group_nos[i]
+                                                        gid = group_id_map.get(gno)
+                                                        if gid is None:
+                                                            continue
+                                                        # Удаляем старых
+                                                        exec_sql("DELETE FROM group_members WHERE group_id=?", (gid,))
+                                                        # Вставляем новых
+                                                        for item in container["items"]:
+                                                            pid = int(item.split("|")[-1])
+                                                            exec_sql("INSERT INTO group_members(group_id, participant_id) VALUES(?,?)",
+                                                                     (gid, pid))
+                                                    st.session_state[confirm_key] = False
+                                                    st.success("✅ Состав групп обновлён!")
+                                                    st.rerun()
+                                            with dnd_c2:
+                                                if st.button("❌ Отмена", use_container_width=True, key="dnd_cancel"):
+                                                    st.session_state[confirm_key] = False
+                                                    st.rerun()
+                                else:
+                                    st.success("✅ Состав групп не изменён.")
+
+                            except ImportError:
+                                st.warning("Для перемещения участников установите пакет: `pip install streamlit-sortables`")
+
         # Кнопка перехода
         if t_status == "bracket":
             active = get_active_stage(tournament_id)
