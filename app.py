@@ -3372,7 +3372,7 @@ with tabs[5]:
                                                    help="Отметьте, если пилот прошёл все круги за отведённое время")
                             with c4:
                                 if tval > 0 and lval > 0:
-                                    proj = tval if aval else calc_projected_time(tval, laps_val=lval, total_laps=total_laps)
+                                    proj = tval if aval else calc_projected_time(tval, laps_completed=lval, total_laps=total_laps)
                                     st.metric("Расчётное", format_time(proj))
 
                         if tval > 0:
