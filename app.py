@@ -647,7 +647,7 @@ def init_db():
     # === Миграции: добавить столбцы, если их нет (для обновления старых БД) ===
     try:
         c.execute("ALTER TABLE tournaments ADD COLUMN scoring_mode TEXT NOT NULL DEFAULT 'none'")
-    except Exception:
+    except sqlite3.OperationalError:
         pass  # столбец уже существует
 
     # Миграция heats: пересоздаём таблицу с правильным UNIQUE constraint
@@ -789,8 +789,9 @@ def participant_count(tournament_id: int) -> int:
 # Бизнес-логика: сетка и плей-офф
 # ============================================================
 
-def get_tournament(tournament_id: int) -> pd.Series:
-    return qdf("SELECT * FROM tournaments WHERE id=?", (tournament_id,)).iloc[0]
+def get_tournament(tournament_id: int) -> Optional[pd.Series]:
+    df = qdf("SELECT * FROM tournaments WHERE id=?", (tournament_id,))
+    return df.iloc[0] if not df.empty else None
 
 
 def get_all_stages(tournament_id: int) -> pd.DataFrame:
@@ -1993,9 +1994,12 @@ with st.sidebar:
             st.caption("👥 Командный зачёт: 2 пилота в команде. Время за попытку суммируется.")
 
         if st.button(T("create_tournament"), type="primary"):
+            if not name.strip():
+                st.error("Введите название турнира!")
+                st.stop()
             exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode, status, created_at)
                         VALUES(?,?,?,?,?,?,?)""",
-                     (name, disc_key, time_limit, int(total_laps), scoring_mode_val, "setup",
+                     (name.strip(), disc_key, time_limit, int(total_laps), scoring_mode_val, "setup",
                       datetime.now().isoformat(timespec="seconds")))
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
             st.session_state["selected_tournament"] = new_id
@@ -2016,6 +2020,8 @@ with st.sidebar:
                         st.session_state[rename_key] = False
                         st.session_state["selected_tournament"] = tournament_id
                         st.rerun()
+                    else:
+                        st.error("Название не может быть пустым!")
             with rc2:
                 if st.button("❌ Отмена", use_container_width=True, key="rename_cancel"):
                     st.session_state[rename_key] = False
@@ -2055,8 +2061,22 @@ with st.sidebar:
                 ic1, ic2 = st.columns(2)
                 with ic1:
                     if st.button("✅ Да, заменить", type="primary", use_container_width=True):
+                        # Закрываем все соединения перед перезаписью
+                        try:
+                            conn = sqlite3.connect(DB_PATH)
+                            conn.close()
+                        except Exception:
+                            pass
                         with open(DB_PATH, "wb") as f:
                             f.write(uploaded.getvalue())
+                        # Проверяем целостность новой БД
+                        try:
+                            test_conn = sqlite3.connect(DB_PATH)
+                            test_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                            test_conn.close()
+                        except Exception:
+                            st.error("⚠️ Загруженный файл не является корректной базой данных!")
+                            st.stop()
                         st.session_state["confirm_db_import"] = False
                         st.success("✅ БД успешно импортирована!")
                         st.rerun()
@@ -2117,6 +2137,9 @@ if tournament_id is None:
 
 # --- Данные турнира ---
 tourn = get_tournament(tournament_id)
+if tourn is None:
+    st.error("Турнир не найден в базе данных.")
+    st.stop()
 discipline = str(tourn["discipline"])
 t_status = str(tourn["status"])
 time_limit = float(tourn["time_limit_seconds"])
@@ -2208,7 +2231,8 @@ with tabs[0]:
         st.markdown("### 📥 Экспорт турнира")
         st.caption("Скачайте полный отчёт по турниру в формате Excel (все этапы, результаты, сводки)")
         try:
-            excel_data = export_tournament_excel(tournament_id)
+            with st.spinner("Генерация отчёта..."):
+                excel_data = export_tournament_excel(tournament_id)
             safe_name = str(tourn["name"]).replace(" ", "_").replace("/", "-")[:30]
             st.download_button(
                 label="📥 Скачать полный отчёт (Excel)",
@@ -2854,7 +2878,7 @@ with tabs[3]:
                             st.success(T("saved"))
                             st.rerun()
                         except Exception as e:
-                            st.error(str(e))
+                            st.error(f"⚠️ Не удалось перейти к следующему этапу: {e}")
                 elif bracket[cur_idx].code == "F":
                     # Финал завершён?
                     final_sd = bracket[cur_idx]
@@ -3073,7 +3097,7 @@ with tabs[4]:
                     st.divider()
                     c1, c2 = st.columns([2, 1])
                     with c1:
-                        if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="po_save"):
+                        if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="po_save_sim"):
                             if len(results_to_save) == len(members):
                                 save_heat(stage_id, group_no, attempt_no, results_to_save,
                                           is_final=False, track_no=track_no, scoring=SIM_SCORING)
@@ -3143,8 +3167,9 @@ with tabs[4]:
                                 # Показываем кто в ничьей
                                 ranking_tb = compute_sim_group_ranking(stage_id, group_no, scoring_mode)
                                 pid_col_tb = "participant_id" if "participant_id" in ranking_tb.columns else "pid"
-                                tied_names = ranking_tb[ranking_tb[pid_col_tb].isin(tg)]["name"].tolist()
-                                tied_pts = int(ranking_tb[ranking_tb[pid_col_tb].isin(tg)].iloc[0]["total_points"])
+                                tied_rows = ranking_tb[ranking_tb[pid_col_tb].isin(tg)]
+                                tied_names = tied_rows["name"].tolist()
+                                tied_pts = int(tied_rows.iloc[0]["total_points"]) if not tied_rows.empty else 0
                                 st.warning(f"🤝 Ничья ({tied_pts} оч.): **{', '.join(tied_names)}**")
 
                             all_tied_pids = []
@@ -3314,7 +3339,7 @@ with tabs[4]:
                     st.divider()
                     c1, c2 = st.columns([2, 1])
                     with c1:
-                        if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="po_save"):
+                        if st.button("💾 СОХРАНИТЬ РЕЗУЛЬТАТЫ", type="primary", use_container_width=True, key="po_save_drone"):
                             if len(results_to_save) == len(members):
                                 save_heat(stage_id, group_no, 1, results_to_save, is_final=False)
                                 st.success(T("saved"))
@@ -3554,8 +3579,9 @@ with tabs[5]:
 
                             for tg in sim_tied_groups:
                                 pid_col = "participant_id" if "participant_id" in sim_standings.columns else "pid"
-                                tied_names = sim_standings[sim_standings[pid_col].isin(tg)]["name"].tolist()
-                                tied_pts = int(sim_standings[sim_standings[pid_col].isin(tg)].iloc[0]["total_points"])
+                                tied_rows_fn = sim_standings[sim_standings[pid_col].isin(tg)]
+                                tied_names = tied_rows_fn["name"].tolist()
+                                tied_pts = int(tied_rows_fn.iloc[0]["total_points"]) if not tied_rows_fn.empty else 0
                                 st.warning(f"🤝 Ничья ({tied_pts} оч.): **{', '.join(tied_names)}**")
 
                             # Тайбрейк: дополнительный вылет
@@ -3580,7 +3606,10 @@ with tabs[5]:
                             tb_results = []
                             pid_col = "participant_id" if "participant_id" in sim_standings.columns else "pid"
                             for tpid in all_tied_pids:
-                                prow = sim_standings[sim_standings[pid_col] == tpid].iloc[0]
+                                prow_df = sim_standings[sim_standings[pid_col] == tpid]
+                                if prow_df.empty:
+                                    continue
+                                prow = prow_df.iloc[0]
                                 pname = prow["name"]
                                 ex = existing_tb_map.get(tpid, {})
                                 fn_tb_pilots = fn_team_map.get(tpid, None) if is_team else None
@@ -3777,8 +3806,9 @@ with tabs[5]:
                         next_tb = max_heat + 1
 
                         for tg in tied_groups:
-                            tied_names = standings[standings["pid"].isin(tg)]["name"].tolist()
-                            tied_total = int(standings[standings["pid"].isin(tg)].iloc[0]["total"])
+                            tied_rows_dr = standings[standings["pid"].isin(tg)]
+                            tied_names = tied_rows_dr["name"].tolist()
+                            tied_total = int(tied_rows_dr.iloc[0]["total"]) if not tied_rows_dr.empty else 0
                             st.warning(f"🤝 Ничья ({tied_total} оч.): **{', '.join(tied_names)}**")
 
                         all_tied_pids = []
@@ -3793,7 +3823,10 @@ with tabs[5]:
 
                         tb_results = []
                         for tpid in all_tied_pids:
-                            prow = standings[standings["pid"] == tpid].iloc[0]
+                            prow_df = standings[standings["pid"] == tpid]
+                            if prow_df.empty:
+                                continue
+                            prow = prow_df.iloc[0]
                             pname = prow["name"]
                             ex = existing_tb_map.get(tpid, {})
 
