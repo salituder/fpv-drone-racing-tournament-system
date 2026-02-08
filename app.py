@@ -2902,9 +2902,11 @@ with tabs[3]:
                             try:
                                 from streamlit_sortables import sort_items
 
-                                # Собираем текущее расположение
+                                # Собираем текущее расположение и маппинг отображаемых имён → pid
                                 original_containers = []
                                 group_id_map = {}  # gno -> group_id в БД
+                                display_to_pid = {}  # "#{sn} Имя" -> pid
+
                                 for gno in sorted(dnd_all_groups.keys()):
                                     members = dnd_all_groups[gno]
                                     gid_df = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?",
@@ -2913,8 +2915,10 @@ with tabs[3]:
                                         group_id_map[gno] = int(gid_df.iloc[0]["id"])
                                     items = []
                                     for _, r in members.iterrows():
-                                        # Формат: "Имя|pid" — pid скрыт от пользователя визуально
-                                        items.append(f"{r['name']}|{int(r['pid'])}")
+                                        sn = f"#{int(r['start_number'])}" if pd.notna(r.get("start_number")) else ""
+                                        display_name = f"{sn} {r['name']}".strip()
+                                        display_to_pid[display_name] = int(r["pid"])
+                                        items.append(display_name)
                                     original_containers.append({
                                         "header": f"Группа {gno}",
                                         "items": items,
@@ -2950,15 +2954,13 @@ with tabs[3]:
                                         # Показываем что изменилось
                                         for i, (orig, curr) in enumerate(zip(original_containers, sorted_containers)):
                                             if orig["items"] != curr["items"]:
-                                                orig_names = [x.split("|")[0] for x in orig["items"]]
-                                                curr_names = [x.split("|")[0] for x in curr["items"]]
-                                                added = set(curr_names) - set(orig_names)
-                                                removed = set(orig_names) - set(curr_names)
+                                                added = set(curr["items"]) - set(orig["items"])
+                                                removed = set(orig["items"]) - set(curr["items"])
                                                 gno = i + 1
                                                 if added:
                                                     st.caption(f"Группа {gno}: + {', '.join(added)}")
                                                 if removed:
-                                                    st.caption(f"Группа {gno}: - {', '.join(removed)}")
+                                                    st.caption(f"Группа {gno}: − {', '.join(removed)}")
 
                                         confirm_key = "confirm_dnd_save"
                                         if not st.session_state.get(confirm_key, False):
@@ -2972,20 +2974,18 @@ with tabs[3]:
                                             with dnd_c1:
                                                 if st.button("✅ Да, сохранить", type="primary",
                                                              use_container_width=True, key="dnd_confirm"):
-                                                    # Обновляем group_members
                                                     group_nos = sorted(dnd_all_groups.keys())
                                                     for i, container in enumerate(sorted_containers):
                                                         gno = group_nos[i]
                                                         gid = group_id_map.get(gno)
                                                         if gid is None:
                                                             continue
-                                                        # Удаляем старых
                                                         exec_sql("DELETE FROM group_members WHERE group_id=?", (gid,))
-                                                        # Вставляем новых
                                                         for item in container["items"]:
-                                                            pid = int(item.split("|")[-1])
-                                                            exec_sql("INSERT INTO group_members(group_id, participant_id) VALUES(?,?)",
-                                                                     (gid, pid))
+                                                            pid = display_to_pid.get(item)
+                                                            if pid is not None:
+                                                                exec_sql("INSERT INTO group_members(group_id, participant_id) VALUES(?,?)",
+                                                                         (gid, pid))
                                                     st.session_state[confirm_key] = False
                                                     st.success("✅ Состав групп обновлён!")
                                                     st.rerun()
