@@ -20,28 +20,82 @@ BASE_CSS = """
 <style>
 .tournament-progress {
     display: flex;
-    gap: 10px;
-    margin: 15px 0;
-    flex-wrap: wrap;
+    align-items: flex-start;
+    margin: 20px 0;
+    position: relative;
+    padding: 0 10px;
 }
-.progress-stage {
-    padding: 8px 16px;
-    border-radius: 20px;
-    font-weight: 500;
-    font-size: 0.9em;
+.progress-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    position: relative;
+    z-index: 1;
 }
-.progress-stage.completed {
+.progress-step:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    top: 14px;
+    left: 50%;
+    width: 100%;
+    height: 3px;
+    background: #3a3a3a;
+    z-index: 0;
+}
+.progress-step.completed:not(:last-child)::after {
     background: #4CAF50;
-    color: white;
 }
-.progress-stage.active {
+.progress-step.active:not(:last-child)::after {
+    background: linear-gradient(90deg, #667eea 0%, #3a3a3a 100%);
+}
+.progress-dot {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #3a3a3a;
+    border: 3px solid #555;
+    z-index: 2;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+}
+.progress-step.completed .progress-dot {
+    background: #4CAF50;
+    border-color: #45a049;
+    box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+}
+.progress-step.active .progress-dot {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    border-color: #667eea;
+    box-shadow: 0 0 12px rgba(102, 126, 234, 0.6);
+    animation: pulse-dot 2s infinite;
 }
-.progress-stage.pending {
-    background: #e0e0e0;
-    color: #666;
+@keyframes pulse-dot {
+    0%, 100% { box-shadow: 0 0 8px rgba(102, 126, 234, 0.4); }
+    50% { box-shadow: 0 0 16px rgba(102, 126, 234, 0.8); }
+}
+.progress-step.pending .progress-dot {
+    background: #2a2a2a;
+    border-color: #444;
+}
+.progress-label {
+    margin-top: 8px;
+    font-size: 0.75em;
+    font-weight: 500;
+    text-align: center;
+    max-width: 90px;
+    line-height: 1.2;
+    color: #888;
+}
+.progress-step.completed .progress-label {
+    color: #4CAF50;
+}
+.progress-step.active .progress-label {
+    color: #667eea;
+    font-weight: 700;
 }
 /* Bracket tree */
 .bracket-container {
@@ -1950,6 +2004,27 @@ with st.sidebar:
     else:
         tournament_id = t_map[sel]
 
+        # Редактирование названия турнира
+        rename_key = "rename_tournament_mode"
+        if st.session_state.get(rename_key, False):
+            new_t_name = st.text_input("Новое название", value=sel, key="rename_input")
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                if st.button("✅ Сохранить", use_container_width=True, key="rename_save"):
+                    if new_t_name.strip():
+                        exec_sql("UPDATE tournaments SET name=? WHERE id=?", (new_t_name.strip(), tournament_id))
+                        st.session_state[rename_key] = False
+                        st.session_state["selected_tournament"] = tournament_id
+                        st.rerun()
+            with rc2:
+                if st.button("❌ Отмена", use_container_width=True, key="rename_cancel"):
+                    st.session_state[rename_key] = False
+                    st.rerun()
+        else:
+            if st.button("✏️ Переименовать", use_container_width=True, key="rename_btn"):
+                st.session_state[rename_key] = True
+                st.rerun()
+
     # --- Управление базой данных ---
     st.divider()
     with st.expander("🗄️ Управление БД", expanded=False):
@@ -2098,8 +2173,20 @@ with tabs[0]:
     # Прогресс
     if bracket:
         st.markdown("**Прогресс турнира:**")
+        qual_css = "completed" if t_status not in ("setup",) else ("active" if t_status == "qualification" else "pending")
+        if t_status == "setup":
+            qual_css = "pending"
+        elif t_status == "qualification":
+            qual_css = "active"
+        else:
+            qual_css = "completed"
+
         progress_html = '<div class="tournament-progress">'
-        progress_html += f'<span class="progress-stage {"completed" if t_status != "setup" else "active"}">Квалификация</span>'
+        qual_dot = "✓" if qual_css == "completed" else ""
+        progress_html += f'<div class="progress-step {qual_css}">'
+        progress_html += f'<div class="progress-dot">{qual_dot}</div>'
+        progress_html += '<div class="progress-label">Квалификация</div></div>'
+
         for idx, sd in enumerate(bracket):
             stage_row = all_stages[all_stages["stage_idx"] == idx] if not all_stages.empty else pd.DataFrame()
             if not stage_row.empty:
@@ -2108,7 +2195,10 @@ with tabs[0]:
             else:
                 css = "pending"
             sname = sd.display_name.get(lang, sd.code)
-            progress_html += f'<span class="progress-stage {css}">{sname}</span>'
+            dot_icon = "✓" if css == "completed" else ""
+            progress_html += f'<div class="progress-step {css}">'
+            progress_html += f'<div class="progress-dot">{dot_icon}</div>'
+            progress_html += f'<div class="progress-label">{sname}</div></div>'
         progress_html += '</div>'
         st.markdown(progress_html, unsafe_allow_html=True)
 
@@ -3779,10 +3869,8 @@ with tabs[6]:
 
             st.success(f"🏆 Турнир завершён! Всего участников: {len(overall_df)}")
 
-            # Подиум
             top3 = overall_df[overall_df["place"] <= 3]
             if len(top3) >= 3:
-                st.markdown("### 🏆 Подиум")
                 pc1, pc2, pc3 = st.columns(3)
                 medals = {1: ("🥇", "gold"), 2: ("🥈", "silver"), 3: ("🥉", "bronze")}
                 for col, place_num in zip([pc2, pc1, pc3], [1, 2, 3]):
@@ -3813,13 +3901,13 @@ with tabs[6]:
             def style_overall(row):
                 place = row["Место"]
                 if place == 1:
-                    return ["background-color: #F9E79F"] * len(row)
+                    return ["background-color: rgba(255, 215, 0, 0.15)"] * len(row)
                 elif place == 2:
-                    return ["background-color: #D5DBDB"] * len(row)
+                    return ["background-color: rgba(192, 192, 192, 0.18)"] * len(row)
                 elif place == 3:
-                    return ["background-color: #E8DAEF"] * len(row)
-                elif place <= 4:
-                    return ["background-color: #D5F5E3"] * len(row)
+                    return ["background-color: rgba(205, 127, 50, 0.15)"] * len(row)
+                elif place == 4:
+                    return ["background-color: rgba(150, 150, 150, 0.08)"] * len(row)
                 return [""] * len(row)
 
             styled = df_display.style.apply(style_overall, axis=1)
