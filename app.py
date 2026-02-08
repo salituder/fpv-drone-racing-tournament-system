@@ -1055,6 +1055,150 @@ def compute_sim_final_standings(stage_id: int, scoring_mode: str) -> pd.DataFram
     return resolve_sim_tiebreaker(stage_id, 1, scoring_mode)
 
 
+def compute_overall_standings(tournament_id: int) -> pd.DataFrame:
+    """Вычисляет общую итоговую таблицу турнира: каждый участник получает своё место.
+
+    Логика распределения мест:
+    1. Финалисты: места 1-4 из итогов финала
+    2. Проигравшие полуфинала: места 5-8 (ранжированы внутри)
+    3. Проигравшие четвертьфинала: места 9-16
+    4. Проигравшие 1/8: места 17-32
+    5. Не прошедшие квалификацию: следующие места
+    """
+    tourn = get_tournament(tournament_id)
+    disc = str(tourn["discipline"])
+    sm = str(tourn.get("scoring_mode", "none"))
+    is_sim_ov = disc in ("sim_individual", "sim_team")
+
+    bracket = get_bracket_for_tournament(tournament_id)
+    all_stages = get_all_stages(tournament_id)
+
+    overall = []  # список {place, pid, name, stage_eliminated, detail}
+    placed_pids = set()
+    current_place = 1
+
+    if bracket and not all_stages.empty:
+        # Проходим этапы с конца (финал → ... → первый этап)
+        for sidx in range(len(bracket) - 1, -1, -1):
+            sd = bracket[sidx]
+            srow = all_stages[all_stages["stage_idx"] == sidx]
+            if srow.empty:
+                continue
+            stage_id = int(srow.iloc[0]["id"])
+            sname = sd.display_name.get("ru", sd.code)
+
+            if sd.code == "F":
+                # Финалисты — из итогов финала
+                if is_sim_ov:
+                    fin = compute_sim_final_standings(stage_id, sm)
+                    pid_col = "participant_id" if "participant_id" in fin.columns else "pid"
+                    if not fin.empty:
+                        for _, row in fin.iterrows():
+                            pid = int(row[pid_col])
+                            detail = f"{int(row['total_points'])} оч."
+                            overall.append({
+                                "place": int(row["rank"]),
+                                "pid": pid, "name": row["name"],
+                                "stage": sname, "detail": detail,
+                            })
+                            placed_pids.add(pid)
+                        current_place = len(fin) + 1
+                else:
+                    fin = compute_final_standings(stage_id)
+                    if not fin.empty:
+                        for _, row in fin.iterrows():
+                            pid = int(row["pid"])
+                            detail = f"{int(row['total'])} оч. ({int(row['wins'])} поб.)"
+                            overall.append({
+                                "place": int(row["rank"]),
+                                "pid": pid, "name": row["name"],
+                                "stage": sname, "detail": detail,
+                            })
+                            placed_pids.add(pid)
+                        current_place = len(fin) + 1
+            else:
+                # Не финальный этап: определяем кто выбыл (3-е и 4-е место в группах)
+                all_groups_ov = get_all_groups(stage_id)
+                eliminated = []
+
+                for gno in sorted(all_groups_ov.keys()):
+                    if is_sim_ov:
+                        ranking = compute_sim_group_ranking(stage_id, gno, sm)
+                        pid_col = "participant_id" if "participant_id" in ranking.columns else "pid"
+                        if not ranking.empty:
+                            for _, row in ranking.iterrows():
+                                pid = int(row[pid_col])
+                                if pid not in placed_pids and int(row["rank"]) > sd.qualifiers:
+                                    eliminated.append({
+                                        "pid": pid, "name": row["name"],
+                                        "sort_key": int(row["total_points"]),
+                                        "detail": f"{int(row['total_points'])} оч.",
+                                        "rank_in_group": int(row["rank"]),
+                                    })
+                    else:
+                        results = get_heat_results(stage_id, gno, 1)
+                        if not results:
+                            # Fallback
+                            gid_fb = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=?", (stage_id, gno))
+                            if not gid_fb.empty:
+                                gid_val = int(gid_fb.iloc[0]["id"])
+                                fb_heat = qdf("SELECT id FROM heats WHERE group_id=? ORDER BY heat_no LIMIT 1", (gid_val,))
+                                if not fb_heat.empty:
+                                    fb_hid = int(fb_heat.iloc[0]["id"])
+                                    fb_df = qdf("""SELECT hr.*, p.name, p.start_number FROM heat_results hr
+                                                   JOIN participants p ON p.id=hr.participant_id
+                                                   WHERE hr.heat_id=? ORDER BY hr.place""", (fb_hid,))
+                                    if not fb_df.empty:
+                                        results = fb_df.to_dict("records")
+                        if results:
+                            for r in results:
+                                pid = int(r["participant_id"])
+                                if pid not in placed_pids and r["place"] > sd.qualifiers:
+                                    t = r.get("projected_time") or r.get("time_seconds")
+                                    eliminated.append({
+                                        "pid": pid, "name": r["name"],
+                                        "sort_key": t if t else 9999,
+                                        "detail": format_time(t),
+                                        "rank_in_group": r["place"],
+                                    })
+
+                # Сортируем выбывших: для сима — по очкам DESC, для дронов — по времени ASC
+                if is_sim_ov:
+                    eliminated.sort(key=lambda x: -x["sort_key"])
+                else:
+                    eliminated.sort(key=lambda x: x["sort_key"])
+
+                for e in eliminated:
+                    overall.append({
+                        "place": current_place,
+                        "pid": e["pid"], "name": e["name"],
+                        "stage": sname, "detail": e["detail"],
+                    })
+                    placed_pids.add(e["pid"])
+                    current_place += 1
+
+    # Не прошедшие квалификацию
+    qual_ranking = get_qual_ranking(tournament_id)
+    if not qual_ranking.empty:
+        advancing = compute_bracket_size(len(qual_ranking))
+        for _, row in qual_ranking.iterrows():
+            pid = int(row["pid"])
+            if pid not in placed_pids:
+                t = row.get("projected_time") or row.get("time_seconds")
+                overall.append({
+                    "place": current_place,
+                    "pid": pid, "name": row["name"],
+                    "stage": "Квалификация",
+                    "detail": format_time(t) if t and pd.notna(t) else "—",
+                })
+                placed_pids.add(pid)
+                current_place += 1
+
+    if overall:
+        return pd.DataFrame(overall)
+    return pd.DataFrame()
+
+
 def check_stage_results_complete(stage_id: int, stage_def: StageDef, disc: str = "drone_individual",
                                  scoring_mode: str = "none") -> Tuple[bool, str]:
     """Проверяет, все ли результаты заполнены для текущего этапа.
@@ -1642,6 +1786,25 @@ def export_tournament_excel(tournament_id: int) -> bytes:
 
             auto_width(ws_stage)
 
+    # ===== Лист: Итоговые результаты =====
+    if str(tourn["status"]) == "finished":
+        ws_overall = wb.create_sheet("Итоги")
+        overall = compute_overall_standings(tournament_id)
+        if not overall.empty:
+            entity = "Команда" if is_team_export else "Пилот"
+            ov_data = []
+            for _, row in overall.iterrows():
+                ov_data.append({
+                    "Место": int(row["place"]),
+                    entity: row["name"],
+                    "Этап выбывания": row["stage"],
+                    "Результат": row["detail"],
+                })
+            df_ov = pd.DataFrame(ov_data)
+            ws_overall.cell(row=1, column=1, value="ИТОГОВЫЕ РЕЗУЛЬТАТЫ ТУРНИРА").font = Font(bold=True, size=13)
+            write_df(ws_overall, df_ov, start_row=3, medal_col=True)
+        auto_width(ws_overall)
+
     # Записываем в буфер
     output = io.BytesIO()
     wb.save(output)
@@ -1787,6 +1950,91 @@ with st.sidebar:
     else:
         tournament_id = t_map[sel]
 
+    # --- Управление базой данных ---
+    st.divider()
+    with st.expander("🗄️ Управление БД", expanded=False):
+        # Экспорт БД
+        st.markdown("**📤 Экспорт базы данных**")
+        st.caption("Скачайте полную копию БД со всеми турнирами")
+        if os.path.exists(DB_PATH):
+            with open(DB_PATH, "rb") as f:
+                db_bytes = f.read()
+            st.download_button("📥 Скачать БД (.db)", data=db_bytes,
+                               file_name="tournament_backup.db",
+                               mime="application/octet-stream",
+                               use_container_width=True)
+
+        st.divider()
+
+        # Импорт БД
+        st.markdown("**📥 Импорт базы данных**")
+        st.caption("⚠️ Загрузка заменит ВСЮ текущую базу данных!")
+        uploaded = st.file_uploader("Выберите .db файл", type=["db"], key="db_upload")
+        if uploaded is not None:
+            if not st.session_state.get("confirm_db_import", False):
+                if st.button("⚠️ Заменить текущую БД", type="primary", use_container_width=True):
+                    st.session_state["confirm_db_import"] = True
+                    st.rerun()
+            else:
+                st.warning("**Вы уверены?** Все текущие данные будут заменены!")
+                ic1, ic2 = st.columns(2)
+                with ic1:
+                    if st.button("✅ Да, заменить", type="primary", use_container_width=True):
+                        with open(DB_PATH, "wb") as f:
+                            f.write(uploaded.getvalue())
+                        st.session_state["confirm_db_import"] = False
+                        st.success("✅ БД успешно импортирована!")
+                        st.rerun()
+                with ic2:
+                    if st.button("❌ Отмена", use_container_width=True):
+                        st.session_state["confirm_db_import"] = False
+                        st.rerun()
+
+    # --- Удаление турнира ---
+    if tournament_id is not None:
+        st.divider()
+        with st.expander("🗑️ Удалить турнир", expanded=False):
+            st.warning(f"Удаление турнира **{sel}** безвозвратно!")
+            del_key = "confirm_delete_tournament"
+            if not st.session_state.get(del_key, False):
+                if st.button("🗑️ Удалить этот турнир", type="primary", use_container_width=True):
+                    st.session_state[del_key] = True
+                    st.rerun()
+            else:
+                st.error("⚠️ Вы уверены? Это действие нельзя отменить!")
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    if st.button("✅ Да, удалить", type="primary", use_container_width=True):
+                        # Удаляем вручную для надёжности (на случай если FK не работает)
+                        stage_ids = qdf("SELECT id FROM stages WHERE tournament_id=?", (tournament_id,))
+                        for _, sr in stage_ids.iterrows():
+                            sid = int(sr["id"])
+                            group_ids = qdf("SELECT id FROM groups WHERE stage_id=?", (sid,))
+                            for _, gr in group_ids.iterrows():
+                                gid = int(gr["id"])
+                                heat_ids = qdf("SELECT id FROM heats WHERE group_id=?", (gid,))
+                                for _, hr in heat_ids.iterrows():
+                                    exec_sql("DELETE FROM heat_results WHERE heat_id=?", (int(hr["id"]),))
+                                exec_sql("DELETE FROM heats WHERE group_id=?", (gid,))
+                                exec_sql("DELETE FROM group_members WHERE group_id=?", (gid,))
+                            exec_sql("DELETE FROM groups WHERE stage_id=?", (sid,))
+                        exec_sql("DELETE FROM stages WHERE tournament_id=?", (tournament_id,))
+                        p_ids = qdf("SELECT id FROM participants WHERE tournament_id=?", (tournament_id,))
+                        for _, pr in p_ids.iterrows():
+                            exec_sql("DELETE FROM team_pilots WHERE participant_id=?", (int(pr["id"]),))
+                        exec_sql("DELETE FROM qualification_results WHERE tournament_id=?", (tournament_id,))
+                        exec_sql("DELETE FROM participants WHERE tournament_id=?", (tournament_id,))
+                        exec_sql("DELETE FROM tournaments WHERE id=?", (tournament_id,))
+                        st.session_state[del_key] = False
+                        if "selected_tournament" in st.session_state:
+                            del st.session_state["selected_tournament"]
+                        st.success("✅ Турнир удалён!")
+                        st.rerun()
+                with dc2:
+                    if st.button("❌ Отмена", use_container_width=True):
+                        st.session_state[del_key] = False
+                        st.rerun()
+
 if tournament_id is None:
     st.header(T("app_title"))
     st.info("Выберите турнир или создайте новый.")
@@ -1825,6 +2073,7 @@ tabs = st.tabs([
     T("nav_bracket"),
     T("nav_playoff"),
     T("nav_final"),
+    "📋 Результаты",
 ])
 
 # ============================================================
@@ -3512,3 +3761,71 @@ with tabs[5]:
                             st.rerun()
             else:
                 st.info("Введите результаты вылетов выше")
+
+# ============================================================
+# TAB 6: Результаты (итоговая таблица всех участников)
+# ============================================================
+with tabs[6]:
+    st.subheader("📋 Итоговые результаты турнира")
+
+    if t_status != "finished":
+        st.info("Итоговая таблица будет доступна после завершения турнира.")
+    else:
+        overall_df = compute_overall_standings(tournament_id)
+        if overall_df.empty:
+            st.warning("Нет данных для отображения.")
+        else:
+            entity_label = "Команда" if is_team else "Пилот"
+
+            st.success(f"🏆 Турнир завершён! Всего участников: {len(overall_df)}")
+
+            # Подиум
+            top3 = overall_df[overall_df["place"] <= 3]
+            if len(top3) >= 3:
+                st.markdown("### 🏆 Подиум")
+                pc1, pc2, pc3 = st.columns(3)
+                medals = {1: ("🥇", "gold"), 2: ("🥈", "silver"), 3: ("🥉", "bronze")}
+                for col, place_num in zip([pc2, pc1, pc3], [1, 2, 3]):
+                    row = top3[top3["place"] == place_num]
+                    if not row.empty:
+                        r = row.iloc[0]
+                        emoji, _ = medals[place_num]
+                        with col:
+                            st.markdown(f"### {emoji} {place_num} место")
+                            st.markdown(f"**{r['name']}**")
+                            st.caption(r["detail"])
+
+            st.divider()
+            st.markdown("### Полная таблица")
+
+            display_rows = []
+            for _, row in overall_df.iterrows():
+                medals_map = {1: "🥇", 2: "🥈", 3: "🥉"}
+                display_rows.append({
+                    "Место": int(row["place"]),
+                    "": medals_map.get(int(row["place"]), ""),
+                    entity_label: row["name"],
+                    "Этап выбывания": row["stage"],
+                    "Результат": row["detail"],
+                })
+            df_display = pd.DataFrame(display_rows)
+
+            def style_overall(row):
+                place = row["Место"]
+                if place == 1:
+                    return ["background-color: #F9E79F"] * len(row)
+                elif place == 2:
+                    return ["background-color: #D5DBDB"] * len(row)
+                elif place == 3:
+                    return ["background-color: #E8DAEF"] * len(row)
+                elif place <= 4:
+                    return ["background-color: #D5F5E3"] * len(row)
+                return [""] * len(row)
+
+            styled = df_display.style.apply(style_overall, axis=1)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            # Экспорт таблицы
+            csv_data = df_display.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 Скачать таблицу результатов (CSV)", data=csv_data,
+                               file_name=f"results_{tournament_id}.csv", mime="text/csv")
