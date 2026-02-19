@@ -5,3 +5,12 @@ __pycache__/
 venv/
 *.db
 .DS_Store
+
+# Офлайн-версия и сборка (не коммитим)
+app_oflline.py
+build/
+dist/
+build_exe.spec
+build_mac.spec
+build_all.py
+run_app.py

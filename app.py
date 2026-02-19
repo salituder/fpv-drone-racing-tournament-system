@@ -223,7 +223,7 @@ BASE_CSS = """
 
 I18N = {
     "RU": {
-        "app_title": "🏁 Турнир по дрон-рейсингу",
+        "app_title": "🏁 Турнир по гонкам дронов (беспилотных воздушных судов)",
         "language": "Язык",
         "tournament": "Турнир",
         "select_tournament": "Выбрать турнир",
@@ -327,9 +327,15 @@ I18N = {
         "time": "Время",
         "laps": "Круги",
         "place": "Место",
+
+        # Дисквалификация
+        "disqualify": "Дисквалифицировать (техпор)",
+        "disqualify_undo": "Снять дисквалификацию",
+        "disqualified": "DSQ",
+        "disqualified_full": "Дисквалифицирован",
     },
     "EN": {
-        "app_title": "🏁 Drone Racing Tournament",
+        "app_title": "🏁 UAV Drone Racing Tournament",
         "language": "Language",
         "tournament": "Tournament",
         "select_tournament": "Select tournament",
@@ -423,6 +429,11 @@ I18N = {
         "time": "Time",
         "laps": "Laps",
         "place": "Place",
+
+        "disqualify": "Disqualify (technical defeat)",
+        "disqualify_undo": "Remove disqualification",
+        "disqualified": "DSQ",
+        "disqualified_full": "Disqualified",
     }
 }
 
@@ -649,6 +660,10 @@ def init_db():
         c.execute("ALTER TABLE tournaments ADD COLUMN scoring_mode TEXT NOT NULL DEFAULT 'none'")
     except sqlite3.OperationalError:
         pass  # столбец уже существует
+    try:
+        c.execute("ALTER TABLE participants ADD COLUMN disqualified INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # столбец уже существует
 
     # Миграция heats: пересоздаём таблицу с правильным UNIQUE constraint
     # Проверяем, есть ли столбец track_no и правильный ли constraint
@@ -753,7 +768,8 @@ def get_qual_ranking(tournament_id: int) -> pd.DataFrame:
     """Ранжированный список квалификации."""
     df = qdf("""
         SELECT p.id as pid, p.name, p.start_number,
-               qr.time_seconds, qr.laps_completed, qr.completed_all_laps, qr.projected_time
+               qr.time_seconds, qr.laps_completed, qr.completed_all_laps, qr.projected_time,
+               COALESCE(p.disqualified,0) as disqualified
         FROM participants p
         JOIN qualification_results qr ON qr.participant_id = p.id AND qr.tournament_id = ?
         WHERE p.tournament_id = ? AND qr.time_seconds IS NOT NULL
@@ -766,7 +782,8 @@ def get_qual_ranking(tournament_id: int) -> pd.DataFrame:
     results = df.to_dict("records")
     ranked = rank_results(results)
     ranked_df = pd.DataFrame(ranked)
-    return ranked_df
+    # Дисквалифицированные — в конец
+    return _apply_dsq_to_ranking(ranked_df, tournament_id, "pid")
 
 
 def save_qual_result(tournament_id: int, participant_id: int, time_seconds: float,
@@ -783,6 +800,41 @@ def save_qual_result(tournament_id: int, participant_id: int, time_seconds: floa
 def participant_count(tournament_id: int) -> int:
     df = qdf("SELECT COUNT(*) as c FROM participants WHERE tournament_id=?", (tournament_id,))
     return int(df.iloc[0]["c"]) if not df.empty else 0
+
+
+def get_disqualified_pids(tournament_id: int) -> set:
+    """Возвращает множество id дисквалифицированных участников турнира."""
+    df = qdf("SELECT id FROM participants WHERE tournament_id=? AND COALESCE(disqualified,0)=1",
+             (tournament_id,))
+    return {int(r["id"]) for _, r in df.iterrows()} if not df.empty else set()
+
+
+def set_participant_disqualified(participant_id: int, disqualified: bool):
+    """Устанавливает или снимает дисквалификацию участника."""
+    exec_sql("UPDATE participants SET disqualified=? WHERE id=?",
+             (1 if disqualified else 0, participant_id))
+
+
+def _apply_dsq_to_ranking(df: pd.DataFrame, tournament_id: int, pid_col: str = "pid") -> pd.DataFrame:
+    """Перемещает дисквалифицированных участников в конец таблицы и пересчитывает места."""
+    if df.empty:
+        return df
+    dsq_pids = get_disqualified_pids(tournament_id)
+    if not dsq_pids:
+        return df
+    pid_name = pid_col if pid_col in df.columns else "participant_id"
+    if pid_name not in df.columns:
+        return df
+    non_dsq = df[~df[pid_name].isin(dsq_pids)]
+    dsq_rows = df[df[pid_name].isin(dsq_pids)]
+    if dsq_rows.empty:
+        return df
+    combined = pd.concat([non_dsq, dsq_rows], ignore_index=True)
+    if "rank" in combined.columns:
+        combined["rank"] = range(1, len(combined) + 1)
+    elif "place" in combined.columns:
+        combined["place"] = range(1, len(combined) + 1)
+    return combined.reset_index(drop=True)
 
 
 # ============================================================
@@ -909,6 +961,11 @@ def get_heat_results(stage_id: int, group_no: int, heat_no: int, track_no: int =
     return df.to_dict("records") if not df.empty else []
 
 
+def _tournament_id_from_stage(stage_id: int) -> Optional[int]:
+    df = qdf("SELECT tournament_id FROM stages WHERE id=?", (stage_id,))
+    return int(df.iloc[0]["tournament_id"]) if not df.empty else None
+
+
 def compute_group_ranking(stage_id: int, group_no: int, discipline: str = "drone_individual",
                           scoring_mode: str = "none") -> pd.DataFrame:
     """Ранжирование в группе: для дронов — один вылет, для сима — агрегация + тайбрейк."""
@@ -917,7 +974,9 @@ def compute_group_ranking(stage_id: int, group_no: int, discipline: str = "drone
     results = get_heat_results(stage_id, group_no, 1)
     if not results:
         return pd.DataFrame()
-    return pd.DataFrame(results)
+    df = pd.DataFrame(results)
+    tid = _tournament_id_from_stage(stage_id)
+    return _apply_dsq_to_ranking(df, tid, "participant_id") if tid else df
 
 
 def compute_final_standings(stage_id: int) -> pd.DataFrame:
@@ -972,7 +1031,8 @@ def compute_final_standings(stage_id: int) -> pd.DataFrame:
     # Определяем наличие ничьих (по total баллам, без учёта тайбрейков)
     df["has_tie"] = df.duplicated(subset=["total"], keep=False)
 
-    return df
+    tid = _tournament_id_from_stage(stage_id)
+    return _apply_dsq_to_ranking(df, tid, "pid") if tid else df
 
 
 def detect_final_ties(standings: pd.DataFrame) -> List[List[int]]:
@@ -1019,7 +1079,8 @@ def compute_sim_group_ranking(stage_id: int, group_no: int, scoring_mode: str = 
         return pd.DataFrame()
     df = df.sort_values("total_points", ascending=False).reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
-    return df
+    tid = _tournament_id_from_stage(stage_id)
+    return _apply_dsq_to_ranking(df, tid, "participant_id") if tid else df
 
 
 def get_sim_track_bests(stage_id: int, group_no: int) -> Dict[int, Dict]:
@@ -1102,7 +1163,8 @@ def resolve_sim_tiebreaker(stage_id: int, group_no: int, scoring_mode: str) -> p
     ranking = ranking.sort_values(["total_points", "tiebreak"], ascending=[False, True]).reset_index(drop=True)
     ranking["rank"] = range(1, len(ranking) + 1)
     ranking = ranking.drop(columns=["tiebreak"])
-    return ranking
+    tid = _tournament_id_from_stage(stage_id)
+    return _apply_dsq_to_ranking(ranking, tid, pid_col) if tid else ranking
 
 
 def compute_sim_final_standings(stage_id: int, scoring_mode: str) -> pd.DataFrame:
@@ -1898,7 +1960,7 @@ def parse_time(time_str: str) -> Optional[float]:
 # ============================================================
 
 st.set_page_config(
-    page_title="Дрон-рейсинг Турнир",
+    page_title="Гонки дронов (БВС) — Турнир",
     page_icon="🏁",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -2364,7 +2426,7 @@ with tabs[1]:
                     st.rerun()
 
     with col2:
-        participants_raw = qdf("""SELECT id, start_number, name
+        participants_raw = qdf("""SELECT id, start_number, name, COALESCE(disqualified,0) as disqualified
                                   FROM participants WHERE tournament_id=?
                                   ORDER BY COALESCE(start_number, 9999), name""", (tournament_id,))
 
@@ -2387,18 +2449,25 @@ with tabs[1]:
                 pname = row["name"]
                 sn = f"#{int(row['start_number'])}" if pd.notna(row["start_number"]) else ""
                 pilots = team_pilots_map.get(pid, None)
+                is_dsq = bool(int(row.get("disqualified", 0)))
+                dsq_suffix = f" — **{T('disqualified_full')}**" if is_dsq else ""
 
                 locked = t_status in ("bracket", "finished")
                 with st.container(border=True):
                     if locked:
-                        c1, c2 = st.columns([1, 5])
+                        c1, c2, c3 = st.columns([1, 4, 1])
                         with c1:
                             st.markdown(f"**{sn}**" if sn else "—")
                         with c2:
                             if is_team and pilots:
-                                st.markdown(f"{pname} ({pilots[0]}, {pilots[1]})")
+                                st.markdown(f"{pname} ({pilots[0]}, {pilots[1]}){dsq_suffix}")
                             else:
-                                st.markdown(pname)
+                                st.markdown(f"{pname}{dsq_suffix}")
+                        with c3:
+                            if st.button("🚫" if is_dsq else "⚠️", key=f"dsq_{pid}", use_container_width=True,
+                                         help=T("disqualify_undo") if is_dsq else T("disqualify")):
+                                set_participant_disqualified(pid, not is_dsq)
+                                st.rerun()
                     else:
                         c1, c2, c3 = st.columns([1, 5, 2])
                         with c1:
@@ -2437,11 +2506,11 @@ with tabs[1]:
                                         st.rerun()
                             else:
                                 if is_team and pilots:
-                                    st.markdown(f"{pname} ({pilots[0]}, {pilots[1]})")
+                                    st.markdown(f"{pname} ({pilots[0]}, {pilots[1]}){dsq_suffix}")
                                 else:
-                                    st.markdown(pname)
+                                    st.markdown(f"{pname}{dsq_suffix}")
                         with c3:
-                            bc1, bc2 = st.columns(2)
+                            bc1, bc2, bc3 = st.columns(3)
                             with bc1:
                                 if st.button("✏️", key=f"btn_edit_{pid}", use_container_width=True):
                                     st.session_state[f"edit_mode_{pid}"] = True
@@ -2451,6 +2520,11 @@ with tabs[1]:
                                     exec_sql("DELETE FROM team_pilots WHERE participant_id=?", (pid,))
                                     exec_sql("DELETE FROM participants WHERE id=?", (pid,))
                                     exec_sql("DELETE FROM qualification_results WHERE participant_id=?", (pid,))
+                                    st.rerun()
+                            with bc3:
+                                if st.button("🚫" if is_dsq else "⚠️", key=f"dsq_{pid}", use_container_width=True,
+                                             help=T("disqualify_undo") if is_dsq else T("disqualify")):
+                                    set_participant_disqualified(pid, not is_dsq)
                                     st.rerun()
 
 # ============================================================
