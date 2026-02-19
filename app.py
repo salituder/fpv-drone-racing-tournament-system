@@ -664,6 +664,33 @@ def init_db():
         c.execute("ALTER TABLE participants ADD COLUMN disqualified INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # столбец уже существует
+    try:
+        c.execute("ALTER TABLE tournaments ADD COLUMN qual_attempts INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # столбец уже существует
+
+    # Миграция qualification_results: добавить attempt_no для нескольких попыток
+    qr_cols = [row[1] for row in c.execute("PRAGMA table_info(qualification_results)").fetchall()]
+    if "attempt_no" not in qr_cols:
+        c.execute("""CREATE TABLE qualification_results_new(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_id INTEGER NOT NULL,
+            participant_id INTEGER NOT NULL,
+            attempt_no INTEGER NOT NULL DEFAULT 1,
+            time_seconds REAL,
+            laps_completed REAL,
+            completed_all_laps INTEGER DEFAULT 0,
+            projected_time REAL,
+            UNIQUE(tournament_id, participant_id, attempt_no),
+            FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
+            FOREIGN KEY(participant_id) REFERENCES participants(id) ON DELETE CASCADE
+        )""")
+        c.execute("""INSERT INTO qualification_results_new(id, tournament_id, participant_id, attempt_no,
+            time_seconds, laps_completed, completed_all_laps, projected_time)
+            SELECT id, tournament_id, participant_id, 1, time_seconds, laps_completed, completed_all_laps, projected_time
+            FROM qualification_results""")
+        c.execute("DROP TABLE qualification_results")
+        c.execute("ALTER TABLE qualification_results_new RENAME TO qualification_results")
 
     # Миграция heats: пересоздаём таблицу с правильным UNIQUE constraint
     # Проверяем, есть ли столбец track_no и правильный ли constraint
@@ -760,22 +787,25 @@ def rank_results(results: List[Dict]) -> List[Dict]:
 
 def get_qualification_results(tournament_id: int) -> pd.DataFrame:
     """Получить результаты квалификации с ранжированием."""
-    df = qdf("""
-        SELECT p.id as pid, p.name, p.start_number,
-               qr.time_seconds, qr.laps_completed, qr.completed_all_laps, qr.projected_time
-        FROM participants p
-        LEFT JOIN qualification_results qr ON qr.participant_id = p.id AND qr.tournament_id = ?
-        WHERE p.tournament_id = ?
-        ORDER BY p.start_number
-    """, (tournament_id, tournament_id))
+    df = get_qual_ranking(tournament_id)
     return df
 
 
+def get_participant_qual_attempts(tournament_id: int, participant_id: int) -> pd.DataFrame:
+    """Получить все попытки квалификации участника."""
+    return qdf("""
+        SELECT attempt_no, time_seconds, laps_completed, completed_all_laps, projected_time
+        FROM qualification_results
+        WHERE tournament_id=? AND participant_id=? AND time_seconds IS NOT NULL
+        ORDER BY attempt_no
+    """, (tournament_id, participant_id))
+
+
 def get_qual_ranking(tournament_id: int) -> pd.DataFrame:
-    """Ранжированный список квалификации."""
+    """Ранжированный список квалификации. При нескольких попытках — берётся лучший результат."""
     df = qdf("""
         SELECT p.id as pid, p.name, p.start_number,
-               qr.time_seconds, qr.laps_completed, qr.completed_all_laps, qr.projected_time,
+               qr.attempt_no, qr.time_seconds, qr.laps_completed, qr.completed_all_laps, qr.projected_time,
                COALESCE(p.disqualified,0) as disqualified
         FROM participants p
         JOIN qualification_results qr ON qr.participant_id = p.id AND qr.tournament_id = ?
@@ -785,22 +815,29 @@ def get_qual_ranking(tournament_id: int) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Ранжируем
+    # При нескольких попытках — выбираем лучший результат по участнику
+    best_rows = []
+    for pid in df["pid"].unique():
+        sub = df[df["pid"] == pid]
+        recs = sub.to_dict("records")
+        ranked_one = rank_results(recs)
+        best_rows.append(ranked_one[0])
+    df = pd.DataFrame(best_rows)
+
     results = df.to_dict("records")
     ranked = rank_results(results)
     ranked_df = pd.DataFrame(ranked)
-    # Дисквалифицированные — в конец
     return _apply_dsq_to_ranking(ranked_df, tournament_id, "pid")
 
 
 def save_qual_result(tournament_id: int, participant_id: int, time_seconds: float,
-                     laps_completed: float, completed_all_laps: bool, total_laps: int = 3):
+                     laps_completed: float, completed_all_laps: bool, total_laps: int = 3, attempt_no: int = 1):
     projected = calc_projected_time(time_seconds, laps_completed, total_laps) if not completed_all_laps else time_seconds
     exec_sql("""
-        INSERT OR REPLACE INTO qualification_results(tournament_id, participant_id,
+        INSERT OR REPLACE INTO qualification_results(tournament_id, participant_id, attempt_no,
             time_seconds, laps_completed, completed_all_laps, projected_time)
-        VALUES(?, ?, ?, ?, ?, ?)
-    """, (tournament_id, participant_id, time_seconds, laps_completed,
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+    """, (tournament_id, participant_id, attempt_no, time_seconds, laps_completed,
           int(completed_all_laps), projected))
 
 
@@ -2075,6 +2112,13 @@ with st.sidebar:
         time_limit = st.number_input(T("time_limit"), value=default_time, min_value=10.0, step=5.0)
         total_laps = st.number_input(T("total_laps"), value=default_laps, min_value=1, step=1)
 
+        qual_attempts_val = 1
+        if disc_key == "drone_individual":
+            qual_attempts_val = st.number_input(
+                "Попыток в квалификации (засчитывается лучший результат)",
+                min_value=1, max_value=5, value=2, step=1,
+                help="От 1 до 5. В квалификации участник делает указанное число вылетов, засчитывается лучший.")
+
         # Для симулятора — автоматически sum_all
         scoring_mode_val = "sum_all" if disc_key in ("sim_individual", "sim_team") else "none"
         if disc_key in ("sim_individual", "sim_team"):
@@ -2087,9 +2131,11 @@ with st.sidebar:
             if not name.strip():
                 st.error("Введите название турнира!")
                 st.stop()
-            exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode, status, created_at)
-                        VALUES(?,?,?,?,?,?,?)""",
-                     (name.strip(), disc_key, time_limit, int(total_laps), scoring_mode_val, "setup",
+            exec_sql("""INSERT INTO tournaments(name, discipline, time_limit_seconds, total_laps, scoring_mode,
+                        qual_attempts, status, created_at)
+                        VALUES(?,?,?,?,?,?,?,?)""",
+                     (name.strip(), disc_key, time_limit, int(total_laps), scoring_mode_val,
+                      int(qual_attempts_val), "setup",
                       datetime.now().isoformat(timespec="seconds")))
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
             st.session_state["selected_tournament"] = new_id
@@ -2234,6 +2280,7 @@ discipline = str(tourn["discipline"])
 t_status = str(tourn["status"])
 time_limit = float(tourn["time_limit_seconds"])
 total_laps = int(tourn["total_laps"])
+qual_attempts = int(tourn.get("qual_attempts", 1))
 scoring_mode = str(tourn.get("scoring_mode", "none"))
 p_count = participant_count(tournament_id)
 is_sim = discipline in ("sim_individual", "sim_team")
@@ -2589,17 +2636,20 @@ with tabs[2]:
             st.info(T("sim_qual_info"))
         else:
             st.info(T("qual_info"))
-        st.caption(f"⏱️ Лимит: {time_limit} сек | 🔄 Кругов: {total_laps}")
+        if qual_attempts > 1:
+            st.caption(f"⏱️ Лимит: {time_limit} сек | 🔄 Кругов: {total_laps} | 📋 {qual_attempts} попыток (засчитывается лучший результат)")
+        else:
+            st.caption(f"⏱️ Лимит: {time_limit} сек | 🔄 Кругов: {total_laps}")
 
         all_participants = qdf("""
-            SELECT p.id as pid, p.name, p.start_number,
-                   qr.time_seconds, qr.laps_completed, qr.completed_all_laps,
-                   COALESCE(p.disqualified,0) as disqualified
+            SELECT p.id as pid, p.name, p.start_number, COALESCE(p.disqualified,0) as disqualified,
+                   (SELECT COUNT(*) FROM qualification_results qr
+                    WHERE qr.participant_id=p.id AND qr.tournament_id=p.tournament_id
+                    AND qr.time_seconds IS NOT NULL) as attempts_filled
             FROM participants p
-            LEFT JOIN qualification_results qr ON qr.participant_id=p.id AND qr.tournament_id=?
             WHERE p.tournament_id=? AND p.start_number IS NOT NULL
             ORDER BY p.start_number
-        """, (tournament_id, tournament_id))
+        """, (tournament_id,))
 
         if all_participants.empty:
             st.warning("Проведите жеребьёвку на вкладке 'Участники'")
@@ -2624,21 +2674,28 @@ with tabs[2]:
                 is_dsq_qual = pid in qual_dsq_pids
                 q_pilots = qual_team_map.get(pid, None) if is_team else None
 
+                attempts_filled = int(row.get("attempts_filled", 0))
                 expander_label = f"**#{sn} {name}**"
                 if is_team and q_pilots:
                     expander_label += f" ({q_pilots[0]}, {q_pilots[1]})"
                 if is_dsq_qual:
                     expander_label += f" — **{T('disqualified')}**"
                 else:
-                    expander_label += " ✅" if pd.notna(row["time_seconds"]) else " ⏳"
+                    if qual_attempts > 1:
+                        expander_label += f" {attempts_filled}/{qual_attempts} ✅" if attempts_filled >= qual_attempts else f" {attempts_filled}/{qual_attempts} ⏳"
+                    else:
+                        expander_label += " ✅" if attempts_filled >= 1 else " ⏳"
 
-                with st.expander(expander_label, expanded=pd.isna(row["time_seconds"]) and not is_dsq_qual):
+                with st.expander(expander_label, expanded=(attempts_filled < qual_attempts) and not is_dsq_qual):
                     if is_dsq_qual:
                         st.caption(f"🚫 {T('disqualified_full')} — результат проставлен автоматически")
                         continue
                     if is_team:
                         # Командный зачёт: два времени пилотов, автосумма
-                        existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
+                        atts_t = get_participant_qual_attempts(tournament_id, pid)
+                        att_row_t = atts_t.iloc[0] if not atts_t.empty else {}
+                        existing_time = float(att_row_t.get("time_seconds", 0)) if att_row_t.get("time_seconds") else 0.0
+                        existing_laps_t = float(att_row_t.get("laps_completed", 0)) if att_row_t.get("laps_completed") else 0.0
                         p1_label = q_pilots[0] if q_pilots else "Пилот 1"
                         p2_label = q_pilots[1] if q_pilots else "Пилот 2"
                         c1, c2, c3 = st.columns([2, 2, 2])
@@ -2658,10 +2715,9 @@ with tabs[2]:
 
                         laps_col1, _ = st.columns([2, 4])
                         with laps_col1:
-                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
                             laps_val = st.number_input(
                                 "Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
+                                value=existing_laps_t, step=0.1, key=f"ql_{pid}", format="%.1f")
                         all_laps = laps_val >= total_laps
 
                         if st.button("💾 Сохранить", key=f"qs_{pid}"):
@@ -2673,17 +2729,19 @@ with tabs[2]:
                                 st.error("Введите время обоих пилотов!")
                     elif is_sim:
                         # Симулятор личный: только время и круги, без расчётного
+                        atts_s = get_participant_qual_attempts(tournament_id, pid)
+                        att_row_s = atts_s.iloc[0] if not atts_s.empty else {}
+                        existing_time_s = float(att_row_s.get("time_seconds", 0)) if att_row_s.get("time_seconds") else 0.0
+                        existing_laps_s = float(att_row_s.get("laps_completed", 0)) if att_row_s.get("laps_completed") else 0.0
                         c1, c2 = st.columns([2, 2])
                         with c1:
-                            existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
                             time_val = st.number_input(
                                 f"Время (сек)", min_value=0.0, max_value=999.0,
-                                value=_safe_time_for_input(existing_time), step=0.001, key=f"qt_{pid}", format="%.3f")
+                                value=_safe_time_for_input(existing_time_s), step=0.001, key=f"qt_{pid}", format="%.3f")
                         with c2:
-                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
                             laps_val = st.number_input(
                                 "Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
+                                value=existing_laps_s, step=0.1, key=f"ql_{pid}", format="%.1f")
                         all_laps = laps_val >= total_laps  # Авто-определяем
 
                         if st.button("💾 Сохранить", key=f"qs_{pid}"):
@@ -2694,34 +2752,44 @@ with tabs[2]:
                             else:
                                 st.error("Введите время!")
                     else:
-                        # Дроны: полный набор полей
-                        c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
-                        with c1:
-                            existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
-                            time_val = st.number_input(
-                                f"Время (сек)", min_value=0.0, max_value=999.0,
-                                value=_safe_time_for_input(existing_time), step=0.001, key=f"qt_{pid}", format="%.3f")
-                        with c2:
-                            existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
-                            laps_val = st.number_input(
-                                "Круги.Препятствия", min_value=0.0, max_value=99.0,
-                                value=existing_laps, step=0.1, key=f"ql_{pid}", format="%.1f")
-                        with c3:
-                            existing_all = bool(int(row["completed_all_laps"])) if pd.notna(row["completed_all_laps"]) else False
-                            all_laps = st.checkbox("Все круги", value=existing_all, key=f"qa_{pid}",
-                                                   help="Отметьте, если пилот прошёл все круги за отведённое время")
-                        with c4:
-                            if time_val > 0 and laps_val > 0:
-                                proj = time_val if all_laps else calc_projected_time(time_val, laps_val, total_laps)
-                                st.metric("Расчётное", format_time(proj))
+                        # Дроны: полный набор полей (может быть несколько попыток)
+                        attempts_data = get_participant_qual_attempts(tournament_id, pid)
+                        attempts_map = {int(r["attempt_no"]): r for _, r in attempts_data.iterrows()} if not attempts_data.empty else {}
 
-                        if st.button("💾 Сохранить", key=f"qs_{pid}"):
-                            if time_val > 0:
-                                save_qual_result(tournament_id, pid, time_val, laps_val, all_laps, total_laps)
-                                st.success(T("saved"))
-                                st.rerun()
-                            else:
-                                st.error("Введите время!")
+                        for att_no in range(1, qual_attempts + 1):
+                            att_row = attempts_map.get(att_no, {})
+                            ex_time = float(att_row["time_seconds"]) if att_row.get("time_seconds") else 0.0
+                            ex_laps = float(att_row["laps_completed"]) if att_row.get("laps_completed") else 0.0
+                            ex_all = bool(int(att_row.get("completed_all_laps", 0))) if att_row else False
+
+                            st.markdown(f"**Вылет {att_no}**" + (" ✅" if att_row else ""))
+                            c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
+                            with c1:
+                                time_val = st.number_input(
+                                    f"Время (сек)", min_value=0.0, max_value=999.0,
+                                    value=_safe_time_for_input(ex_time), step=0.001,
+                                    key=f"qt_{pid}_{att_no}", format="%.3f")
+                            with c2:
+                                laps_val = st.number_input(
+                                    "Круги.Препятствия", min_value=0.0, max_value=99.0,
+                                    value=ex_laps, step=0.1, key=f"ql_{pid}_{att_no}", format="%.1f")
+                            with c3:
+                                all_laps = st.checkbox("Все круги", value=ex_all, key=f"qa_{pid}_{att_no}",
+                                                       help="Отметьте, если пилот прошёл все круги за отведённое время")
+                            with c4:
+                                if time_val > 0 and laps_val > 0:
+                                    proj = time_val if all_laps else calc_projected_time(time_val, laps_val, total_laps)
+                                    st.metric("Расчётное", format_time(proj))
+
+                            if st.button(f"💾 Сохранить вылет {att_no}", key=f"qs_{pid}_{att_no}"):
+                                if time_val > 0:
+                                    save_qual_result(tournament_id, pid, time_val, laps_val, all_laps, total_laps, attempt_no=att_no)
+                                    st.success(T("saved"))
+                                    st.rerun()
+                                else:
+                                    st.error("Введите время!")
+                            if att_no < qual_attempts:
+                                st.divider()
 
             # --- Таблица результатов ---
             st.divider()
@@ -2750,8 +2818,18 @@ with tabs[2]:
 
                 # Кнопка завершения
                 st.divider()
-                filled = int(qdf("SELECT COUNT(*) as c FROM qualification_results WHERE tournament_id=? AND time_seconds IS NOT NULL",
-                                  (tournament_id,)).iloc[0]["c"])
+                if qual_attempts > 1:
+                    filled = int(qdf("""
+                        SELECT COUNT(*) as c FROM (
+                            SELECT participant_id FROM qualification_results
+                            WHERE tournament_id=? AND time_seconds IS NOT NULL
+                            GROUP BY participant_id
+                            HAVING COUNT(*) >= ?
+                        )
+                    """, (tournament_id, qual_attempts)).iloc[0]["c"])
+                else:
+                    filled = int(qdf("SELECT COUNT(DISTINCT participant_id) as c FROM qualification_results WHERE tournament_id=? AND time_seconds IS NOT NULL",
+                                    (tournament_id,)).iloc[0]["c"])
                 if filled < total_p:
                     st.warning(f"Результаты введены: {filled} из {total_p}")
 
