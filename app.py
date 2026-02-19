@@ -810,9 +810,30 @@ def get_disqualified_pids(tournament_id: int) -> set:
 
 
 def set_participant_disqualified(participant_id: int, disqualified: bool):
-    """Устанавливает или снимает дисквалификацию участника."""
+    """Устанавливает или снимает дисквалификацию участника.
+    При дисквалификации: авто-проставляет худший результат в квалификацию и во все heat_results."""
     exec_sql("UPDATE participants SET disqualified=? WHERE id=?",
              (1 if disqualified else 0, participant_id))
+    if disqualified:
+        # Получаем tournament_id и total_laps
+        p_df = qdf("SELECT p.tournament_id, COALESCE(t.total_laps, 3) as total_laps "
+                   "FROM participants p LEFT JOIN tournaments t ON t.id=p.tournament_id WHERE p.id=?",
+                   (participant_id,))
+        if not p_df.empty:
+            tid = int(p_df.iloc[0]["tournament_id"])
+            total_laps = int(p_df.iloc[0]["total_laps"])
+            save_qual_result(tid, participant_id, 9999.0, 0.0, False, total_laps)
+        # Обновляем все heat_results участника на худший результат
+        exec_sql("""
+            UPDATE heat_results SET time_seconds=9999, laps_completed=0, completed_all_laps=0,
+                   place=4, points=0, projected_time=9999
+            WHERE participant_id=? AND heat_id IN (
+                SELECT h.id FROM heats h
+                JOIN groups g ON g.id=h.group_id
+                JOIN stages s ON s.id=g.stage_id
+                WHERE s.tournament_id=(SELECT tournament_id FROM participants WHERE id=?)
+            )
+        """, (participant_id, participant_id))
 
 
 def _apply_dsq_to_ranking(df: pd.DataFrame, tournament_id: int, pid_col: str = "pid") -> pd.DataFrame:
@@ -2565,7 +2586,8 @@ with tabs[2]:
 
         all_participants = qdf("""
             SELECT p.id as pid, p.name, p.start_number,
-                   qr.time_seconds, qr.laps_completed, qr.completed_all_laps
+                   qr.time_seconds, qr.laps_completed, qr.completed_all_laps,
+                   COALESCE(p.disqualified,0) as disqualified
             FROM participants p
             LEFT JOIN qualification_results qr ON qr.participant_id=p.id AND qr.tournament_id=?
             WHERE p.tournament_id=? AND p.start_number IS NOT NULL
@@ -2587,18 +2609,26 @@ with tabs[2]:
                     for _, tpr in tp_q.iterrows():
                         qual_team_map[int(tpr["participant_id"])] = (tpr["pilot1_name"], tpr["pilot2_name"])
 
+            qual_dsq_pids = get_disqualified_pids(tournament_id)
             for _, row in all_participants.iterrows():
                 pid = int(row["pid"])
                 sn = int(row["start_number"])
                 name = row["name"]
+                is_dsq_qual = pid in qual_dsq_pids
                 q_pilots = qual_team_map.get(pid, None) if is_team else None
 
                 expander_label = f"**#{sn} {name}**"
                 if is_team and q_pilots:
                     expander_label += f" ({q_pilots[0]}, {q_pilots[1]})"
-                expander_label += " ✅" if pd.notna(row["time_seconds"]) else " ⏳"
+                if is_dsq_qual:
+                    expander_label += f" — **{T('disqualified')}**"
+                else:
+                    expander_label += " ✅" if pd.notna(row["time_seconds"]) else " ⏳"
 
-                with st.expander(expander_label, expanded=pd.isna(row["time_seconds"])):
+                with st.expander(expander_label, expanded=pd.isna(row["time_seconds"]) and not is_dsq_qual):
+                    if is_dsq_qual:
+                        st.caption(f"🚫 {T('disqualified_full')} — результат проставлен автоматически")
+                        continue
                     if is_team:
                         # Командный зачёт: два времени пилотов, автосумма
                         existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
@@ -3242,6 +3272,7 @@ with tabs[4]:
                     members = all_groups[group_no]
                     existing = get_heat_results(stage_id, group_no, attempt_no, track_no)
                     existing_map = {r["participant_id"]: r for r in existing}
+                    po_dsq_pids = get_disqualified_pids(tournament_id)
 
                     st.divider()
                     entity_label = "команды" if is_team else "пилота"
@@ -3252,10 +3283,16 @@ with tabs[4]:
                     for _, m in members.iterrows():
                         pid = int(m["pid"])
                         pname = m["name"]
+                        is_dsq = pid in po_dsq_pids
                         ex = existing_map.get(pid, {})
                         po_pilots = po_team_map.get(pid, None) if is_team else None
 
                         with st.container(border=True):
+                            if is_dsq:
+                                dsq_label = f"**{pname}** — {T('disqualified')}" if not (is_team and po_pilots) else f"**{pname}** ({po_pilots[0]}, {po_pilots[1]}) — {T('disqualified')}"
+                                st.markdown(dsq_label)
+                                results_to_save.append({"pid": pid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                continue
                             if is_team and po_pilots:
                                 st.markdown(f"**{pname}** ({po_pilots[0]}, {po_pilots[1]})")
                             else:
@@ -3393,6 +3430,7 @@ with tabs[4]:
                             # track_no=99 — специальный маркер тайбрейка
                             existing_tb = get_heat_results(stage_id, group_no, 1, track_no=99)
                             existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+                            tb_dsq_pids = get_disqualified_pids(tournament_id)
 
                             tb_results = []
                             members_tb = get_group_members(stage_id, group_no)
@@ -3401,10 +3439,16 @@ with tabs[4]:
                                 if prow.empty:
                                     continue
                                 pname = prow.iloc[0]["name"]
+                                is_dsq_tb = tpid in tb_dsq_pids
                                 ex = existing_tb_map.get(tpid, {})
                                 tb_pilots = po_team_map.get(tpid, None) if is_team else None
 
                                 with st.container(border=True):
+                                    if is_dsq_tb:
+                                        dsq_lbl = f"**{pname}** — {T('disqualified')}" if not (is_team and tb_pilots) else f"**{pname}** ({tb_pilots[0]}, {tb_pilots[1]}) — {T('disqualified')}"
+                                        st.markdown(dsq_lbl)
+                                        tb_results.append({"pid": tpid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                        continue
                                     if is_team and tb_pilots:
                                         st.markdown(f"**{pname}** ({tb_pilots[0]}, {tb_pilots[1]})")
                                     else:
@@ -3509,6 +3553,7 @@ with tabs[4]:
                     members = all_groups[group_no]
                     existing = get_heat_results(stage_id, group_no, 1)
                     existing_map = {r["participant_id"]: r for r in existing}
+                    po_dsq_pids = get_disqualified_pids(tournament_id)
 
                     st.divider()
                     st.markdown(f"### {T('group')} {group_no} — Вылет")
@@ -3518,9 +3563,14 @@ with tabs[4]:
                     for _, m in members.iterrows():
                         pid = int(m["pid"])
                         pname = m["name"]
+                        is_dsq = pid in po_dsq_pids
                         ex = existing_map.get(pid, {})
 
                         with st.container(border=True):
+                            if is_dsq:
+                                st.markdown(f"**{pname}** — {T('disqualified')}")
+                                results_to_save.append({"pid": pid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                continue
                             st.markdown(f"**{pname}**")
                             c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
                             with c1:
@@ -3638,6 +3688,7 @@ with tabs[5]:
 
                 existing = get_heat_results(stage_id, 1, fn_attempt, fn_track)
                 existing_map = {r["participant_id"]: r for r in existing}
+                fn_dsq_pids = get_disqualified_pids(tournament_id)
 
                 st.divider()
                 fn_entity = "команды" if is_team else "пилота"
@@ -3648,10 +3699,16 @@ with tabs[5]:
                 for _, m in members.iterrows():
                     pid = int(m["pid"])
                     pname = m["name"]
+                    is_dsq = pid in fn_dsq_pids
                     ex = existing_map.get(pid, {})
                     fn_pilots = fn_team_map.get(pid, None) if is_team else None
 
                     with st.container(border=True):
+                        if is_dsq:
+                            dsq_label = f"**{pname}** — {T('disqualified')}" if not (is_team and fn_pilots) else f"**{pname}** ({fn_pilots[0]}, {fn_pilots[1]}) — {T('disqualified')}"
+                            st.markdown(dsq_label)
+                            results_to_save.append({"pid": pid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                            continue
                         if is_team and fn_pilots:
                             st.markdown(f"**{pname}** ({fn_pilots[0]}, {fn_pilots[1]})")
                         else:
@@ -3812,6 +3869,7 @@ with tabs[5]:
 
                             existing_tb = get_heat_results(stage_id, 1, next_tb, track_no=1)
                             existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+                            fn_tb_dsq_pids = get_disqualified_pids(tournament_id)
 
                             tb_results = []
                             pid_col = "participant_id" if "participant_id" in sim_standings.columns else "pid"
@@ -3821,10 +3879,16 @@ with tabs[5]:
                                     continue
                                 prow = prow_df.iloc[0]
                                 pname = prow["name"]
+                                is_dsq_tb = tpid in fn_tb_dsq_pids
                                 ex = existing_tb_map.get(tpid, {})
                                 fn_tb_pilots = fn_team_map.get(tpid, None) if is_team else None
 
                                 with st.container(border=True):
+                                    if is_dsq_tb:
+                                        dsq_lbl = f"**{pname}** — {T('disqualified')}" if not (is_team and fn_tb_pilots) else f"**{pname}** ({fn_tb_pilots[0]}, {fn_tb_pilots[1]}) — {T('disqualified')}"
+                                        st.markdown(dsq_lbl)
+                                        tb_results.append({"pid": tpid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                        continue
                                     if is_team and fn_tb_pilots:
                                         st.markdown(f"**{pname}** ({fn_tb_pilots[0]}, {fn_tb_pilots[1]})")
                                     else:
@@ -3913,6 +3977,7 @@ with tabs[5]:
 
                 existing = get_heat_results(stage_id, 1, heat_no)
                 existing_map = {r["participant_id"]: r for r in existing}
+                fn_dsq_pids = get_disqualified_pids(tournament_id)
 
                 if is_finished:
                     if existing:
@@ -3929,9 +3994,14 @@ with tabs[5]:
                     for _, m in members.iterrows():
                         pid = int(m["pid"])
                         pname = m["name"]
+                        is_dsq = pid in fn_dsq_pids
                         ex = existing_map.get(pid, {})
 
                         with st.container(border=True):
+                            if is_dsq:
+                                st.markdown(f"**{pname}** — {T('disqualified')}")
+                                results_to_save.append({"pid": pid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                continue
                             st.markdown(f"**{pname}**")
                             c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
                             with c1:
@@ -4030,6 +4100,7 @@ with tabs[5]:
 
                         existing_tb = get_heat_results(stage_id, 1, next_tb)
                         existing_tb_map = {r["participant_id"]: r for r in existing_tb}
+                        fn_dr_tb_dsq_pids = get_disqualified_pids(tournament_id)
 
                         tb_results = []
                         for tpid in all_tied_pids:
@@ -4038,9 +4109,14 @@ with tabs[5]:
                                 continue
                             prow = prow_df.iloc[0]
                             pname = prow["name"]
+                            is_dsq_tb = tpid in fn_dr_tb_dsq_pids
                             ex = existing_tb_map.get(tpid, {})
 
                             with st.container(border=True):
+                                if is_dsq_tb:
+                                    st.markdown(f"**{pname}** — {T('disqualified')}")
+                                    tb_results.append({"pid": tpid, "time_seconds": 9999.0, "laps_completed": 0.0, "completed_all_laps": False})
+                                    continue
                                 st.markdown(f"**{pname}**")
                                 c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
                                 with c1:
