@@ -735,6 +735,13 @@ def calc_projected_time(time_seconds: float, laps_completed: float, total_laps: 
     return None
 
 
+def _safe_time_for_input(seconds: float) -> float:
+    """Для number_input(max_value=999): 9999 (DSQ sentinel) и больше -> 0."""
+    if seconds is None or seconds > 999:
+        return 0.0
+    return float(seconds)
+
+
 def rank_results(results: List[Dict]) -> List[Dict]:
     """
     Ранжирование по времени:
@@ -2638,12 +2645,12 @@ with tabs[2]:
                         with c1:
                             t1_val = st.number_input(
                                 f"⏱️ {p1_label} (сек)", min_value=0.0, max_value=999.0,
-                                value=existing_time / 2 if existing_time > 0 else 0.0,
+                                value=_safe_time_for_input(existing_time) / 2,
                                 step=0.001, key=f"qt1_{pid}", format="%.3f")
                         with c2:
                             t2_val = st.number_input(
                                 f"⏱️ {p2_label} (сек)", min_value=0.0, max_value=999.0,
-                                value=existing_time / 2 if existing_time > 0 else 0.0,
+                                value=_safe_time_for_input(existing_time) / 2,
                                 step=0.001, key=f"qt2_{pid}", format="%.3f")
                         with c3:
                             sum_time = t1_val + t2_val
@@ -2671,7 +2678,7 @@ with tabs[2]:
                             existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
                             time_val = st.number_input(
                                 f"Время (сек)", min_value=0.0, max_value=999.0,
-                                value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
+                                value=_safe_time_for_input(existing_time), step=0.001, key=f"qt_{pid}", format="%.3f")
                         with c2:
                             existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
                             laps_val = st.number_input(
@@ -2693,7 +2700,7 @@ with tabs[2]:
                             existing_time = float(row["time_seconds"]) if pd.notna(row["time_seconds"]) else 0.0
                             time_val = st.number_input(
                                 f"Время (сек)", min_value=0.0, max_value=999.0,
-                                value=existing_time, step=0.001, key=f"qt_{pid}", format="%.3f")
+                                value=_safe_time_for_input(existing_time), step=0.001, key=f"qt_{pid}", format="%.3f")
                         with c2:
                             existing_laps = float(row["laps_completed"]) if pd.notna(row["laps_completed"]) else 0.0
                             laps_val = st.number_input(
@@ -3306,11 +3313,11 @@ with tabs[4]:
                                 tc1, tc2, tc3 = st.columns([2, 2, 2])
                                 with tc1:
                                     t1v = st.number_input(f"⏱️ {p1_lbl}", min_value=0.0, max_value=999.0,
-                                                          value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                          value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                           key=f"po_t1_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
                                 with tc2:
                                     t2v = st.number_input(f"⏱️ {p2_lbl}", min_value=0.0, max_value=999.0,
-                                                          value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                          value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                           key=f"po_t2_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
                                 with tc3:
                                     tval = t1v + t2v
@@ -3327,7 +3334,7 @@ with tabs[4]:
                                 with c1:
                                     ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                     tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                           value=ex_time, step=0.001,
+                                                           value=_safe_time_for_input(ex_time), step=0.001,
                                                            key=f"po_t_{group_no}_{track_no}_{attempt_no}_{pid}", format="%.3f")
                                 with c2:
                                     ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
@@ -3461,11 +3468,11 @@ with tabs[4]:
                                         tbc1, tbc2, tbc3 = st.columns([2, 2, 2])
                                         with tbc1:
                                             tb1v = st.number_input(f"⏱️ {p1l}", min_value=0.0, max_value=999.0,
-                                                                   value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                   value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                                    key=f"tb_t1_{group_no}_{tpid}", format="%.3f")
                                         with tbc2:
                                             tb2v = st.number_input(f"⏱️ {p2l}", min_value=0.0, max_value=999.0,
-                                                                   value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                   value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                                    key=f"tb_t2_{group_no}_{tpid}", format="%.3f")
                                         with tbc3:
                                             tval = tb1v + tb2v
@@ -3481,7 +3488,7 @@ with tabs[4]:
                                         with c1:
                                             ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                             tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                                   value=ex_time, step=0.001,
+                                                                   value=_safe_time_for_input(ex_time), step=0.001,
                                                                    key=f"tb_t_{group_no}_{tpid}", format="%.3f")
                                         with c2:
                                             ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
@@ -3576,7 +3583,7 @@ with tabs[4]:
                             with c1:
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                 tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                       value=ex_time, step=0.001, key=f"po_t_{group_no}_{pid}", format="%.3f")
+                                                       value=_safe_time_for_input(ex_time), step=0.001, key=f"po_t_{group_no}_{pid}", format="%.3f")
                             with c2:
                                 ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
                                 lval = st.number_input("Круги.Препятствия", min_value=0.0, max_value=99.0,
@@ -3721,11 +3728,11 @@ with tabs[5]:
                             fc1, fc2, fc3 = st.columns([2, 2, 2])
                             with fc1:
                                 ft1v = st.number_input(f"⏱️ {p1_lbl}", min_value=0.0, max_value=999.0,
-                                                       value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                       value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                        key=f"fn_t1_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
                             with fc2:
                                 ft2v = st.number_input(f"⏱️ {p2_lbl}", min_value=0.0, max_value=999.0,
-                                                       value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                       value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                        key=f"fn_t2_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
                             with fc3:
                                 tval = ft1v + ft2v
@@ -3741,7 +3748,7 @@ with tabs[5]:
                             with c1:
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                 tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                       value=ex_time, step=0.001,
+                                                       value=_safe_time_for_input(ex_time), step=0.001,
                                                        key=f"fn_t_{fn_track}_{fn_attempt}_{pid}", format="%.3f")
                             with c2:
                                 ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
@@ -3901,11 +3908,11 @@ with tabs[5]:
                                         fntbc1, fntbc2, fntbc3 = st.columns([2, 2, 2])
                                         with fntbc1:
                                             fntb1v = st.number_input(f"⏱️ {p1l}", min_value=0.0, max_value=999.0,
-                                                                     value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                     value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                                      key=f"fn_tb_t1_{next_tb}_{tpid}", format="%.3f")
                                         with fntbc2:
                                             fntb2v = st.number_input(f"⏱️ {p2l}", min_value=0.0, max_value=999.0,
-                                                                     value=ex_time / 2 if ex_time > 0 else 0.0, step=0.001,
+                                                                     value=_safe_time_for_input(ex_time) / 2, step=0.001,
                                                                      key=f"fn_tb_t2_{next_tb}_{tpid}", format="%.3f")
                                         with fntbc3:
                                             tval = fntb1v + fntb2v
@@ -3921,7 +3928,7 @@ with tabs[5]:
                                         with c1:
                                             ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                             tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                                   value=ex_time, step=0.001,
+                                                                   value=_safe_time_for_input(ex_time), step=0.001,
                                                                    key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
                                         with c2:
                                             ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
@@ -4007,7 +4014,7 @@ with tabs[5]:
                             with c1:
                                 ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                 tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                       value=ex_time, step=0.001,
+                                                       value=_safe_time_for_input(ex_time), step=0.001,
                                                        key=f"fn_t_{heat_no}_{pid}", format="%.3f")
                             with c2:
                                 ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
@@ -4122,7 +4129,7 @@ with tabs[5]:
                                 with c1:
                                     ex_time = float(ex["time_seconds"]) if ex.get("time_seconds") else 0.0
                                     tval = st.number_input("Время (сек)", min_value=0.0, max_value=999.0,
-                                                           value=ex_time, step=0.001,
+                                                           value=_safe_time_for_input(ex_time), step=0.001,
                                                            key=f"tb_t_{next_tb}_{tpid}", format="%.3f")
                                 with c2:
                                     ex_laps = float(ex["laps_completed"]) if ex.get("laps_completed") else 0.0
