@@ -2694,6 +2694,7 @@ with tabs[1]:
                                 if added > 0:
                                     st.session_state["selected_tournament"] = tournament_id
                                     st.session_state["tournament_select_init"] = tournament_id
+                                    st.session_state["tournament_just_created"] = True
                                     st.success(f"Импортировано: {added}")
                                     st.rerun()
                         except Exception as e:
