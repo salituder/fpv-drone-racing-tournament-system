@@ -2639,6 +2639,12 @@ with tabs[1]:
                 st.caption("Формат: колонка ФИО, Категория, колонки «75 ЛЗ» (дроны) и «ТС ЛЗ» (симулятор) с «+». "
                           "Если файл в формате .xls — сохраните в Excel как .xlsx.")
                 excel_upload = st.file_uploader("Файл .xlsx", type=["xlsx"], key="excel_import")
+                discipline_filter = st.selectbox(
+                    "Дисциплина в файле",
+                    ["75 ЛЗ (дроны)", "ТС ЛЗ (симулятор)"],
+                    index=0 if discipline == "drone_individual" else 1,
+                    key="excel_discipline"
+                )
                 category_filter = st.selectbox(
                     "Категория",
                     ["Все категории", "Мальчики", "Юниорки", "Юниоры", "Девочки"],
@@ -2653,12 +2659,13 @@ with tabs[1]:
                                 st.warning("Файл пустой.")
                             else:
                                 cat_val = None if category_filter == "Все категории" else category_filter
-                                names, detected = _parse_excel_discipline_list(df, discipline, category_filter=cat_val)
+                                disc_for_import = "drone_individual" if "75" in discipline_filter else "sim_individual"
+                                names, detected = _parse_excel_discipline_list(df, disc_for_import, category_filter=cat_val)
                                 added = 0
                                 if not names and detected.get("75лз") is None and detected.get("тслз") is None:
                                     st.warning("Не найдены колонки «75 ЛЗ» или «ТС ЛЗ». Проверьте структуру файла.")
                                 elif not names:
-                                    disc_label = "75 ЛЗ" if discipline == "drone_individual" else "ТС ЛЗ"
+                                    disc_label = "75 ЛЗ" if "75" in discipline_filter else "ТС ЛЗ"
                                     st.warning(f"Нет участников с «+» в колонке {disc_label}.")
                                 else:
                                     for name in names:
