@@ -2211,8 +2211,9 @@ with st.sidebar:
     # Инициализация: после создания — tournament_select_init; при первом заходе — selected_tournament
     # Используем index только при инициализации, иначе виджет хранит выбор в key
     if "tournament_select_init" in st.session_state:
-        init_name = st.session_state.pop("tournament_select_init")
-        default_idx = options.index(init_name) if init_name in options else 0
+        init_id = st.session_state.pop("tournament_select_init")
+        init_name = id_to_name.get(init_id) if init_id in id_to_name else None
+        default_idx = options.index(init_name) if init_name and init_name in options else 0
         sel = st.selectbox(T("select_tournament"), options, index=default_idx, key="tournament_selectbox")
     elif "selected_tournament" in st.session_state and "tournament_selectbox" not in st.session_state:
         saved_id = st.session_state["selected_tournament"]
@@ -2275,9 +2276,8 @@ with st.sidebar:
                       int(qual_attempts_val), "setup",
                       datetime.now().isoformat(timespec="seconds")))
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
-            new_name = qdf("SELECT name FROM tournaments WHERE id=?", (new_id,)).iloc[0]["name"]
             st.session_state["selected_tournament"] = new_id
-            st.session_state["tournament_select_init"] = str(new_name)
+            st.session_state["tournament_select_init"] = new_id
             st.rerun()
         tournament_id = None
     else:
