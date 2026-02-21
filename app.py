@@ -2760,9 +2760,9 @@ with tabs[2]:
                             att_row = attempts_map.get(att_no, {})
                             ex_time = float(att_row["time_seconds"]) if att_row.get("time_seconds") else 0.0
                             ex_laps = float(att_row["laps_completed"]) if att_row.get("laps_completed") else 0.0
-                            ex_all = bool(int(att_row.get("completed_all_laps", 0))) if att_row else False
+                            ex_all = bool(int(att_row.get("completed_all_laps", 0))) if att_no in attempts_map else False
 
-                            st.markdown(f"**Вылет {att_no}**" + (" ✅" if att_row else ""))
+                            st.markdown(f"**Вылет {att_no}**" + (" ✅" if att_no in attempts_map else ""))
                             c1, c2, c3, c4 = st.columns([2, 2, 1, 2])
                             with c1:
                                 time_val = st.number_input(
