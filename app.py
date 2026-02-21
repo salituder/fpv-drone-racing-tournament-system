@@ -2208,15 +2208,21 @@ with st.sidebar:
     id_to_name = {v: k for k, v in t_map.items()}
     options = [T("create_new")] + list(t_map.keys())
 
-    # Инициализируем selectbox при первом заходе или после создания турнира (без index, чтобы не перезаписывать выбор)
-    if "selected_tournament" in st.session_state:
+    # Инициализация: после создания — tournament_select_init; при первом заходе — selected_tournament
+    # Используем index только при инициализации, иначе виджет хранит выбор в key
+    if "tournament_select_init" in st.session_state:
+        init_name = st.session_state.pop("tournament_select_init")
+        default_idx = options.index(init_name) if init_name in options else 0
+        sel = st.selectbox(T("select_tournament"), options, index=default_idx, key="tournament_selectbox")
+    elif "selected_tournament" in st.session_state and "tournament_selectbox" not in st.session_state:
         saved_id = st.session_state["selected_tournament"]
         if saved_id in id_to_name and id_to_name[saved_id] in options:
-            target_name = id_to_name[saved_id]
-            if "tournament_select" not in st.session_state:
-                st.session_state["tournament_select"] = target_name
-
-    sel = st.selectbox(T("select_tournament"), options, key="tournament_select")
+            default_idx = options.index(id_to_name[saved_id])
+            sel = st.selectbox(T("select_tournament"), options, index=default_idx, key="tournament_selectbox")
+        else:
+            sel = st.selectbox(T("select_tournament"), options, key="tournament_selectbox")
+    else:
+        sel = st.selectbox(T("select_tournament"), options, key="tournament_selectbox")
 
     DISCIPLINES = {
         "drone_individual": T("drone_individual"),
@@ -2271,7 +2277,7 @@ with st.sidebar:
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
             new_name = qdf("SELECT name FROM tournaments WHERE id=?", (new_id,)).iloc[0]["name"]
             st.session_state["selected_tournament"] = new_id
-            st.session_state["tournament_select"] = str(new_name)
+            st.session_state["tournament_select_init"] = str(new_name)
             st.rerun()
         tournament_id = None
     else:
@@ -2393,8 +2399,8 @@ with st.sidebar:
                         st.session_state[del_key] = False
                         if "selected_tournament" in st.session_state:
                             del st.session_state["selected_tournament"]
-                        if "tournament_select" in st.session_state:
-                            del st.session_state["tournament_select"]
+                        if "tournament_selectbox" in st.session_state:
+                            del st.session_state["tournament_selectbox"]
                         st.success("✅ Турнир удалён!")
                         st.rerun()
                 with dc2:
