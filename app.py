@@ -751,6 +751,76 @@ def exec_many(sql, rows):
     conn.close()
 
 
+def _detect_excel_discipline_columns(df: pd.DataFrame, scan_rows: int = 3) -> dict:
+    """
+    Сканирует заголовки Excel (строки 1–3): Дисциплина, под ней ТС/75, под ними ЛЗ.
+    Находит колонки: ФИО, 75 ЛЗ (дроны), ТС ЛЗ (симулятор).
+    """
+    result = {}
+    if df.empty or df.shape[1] == 0:
+        return result
+    n_cols = df.shape[1]
+    n_rows = min(scan_rows, len(df))
+
+    for col_idx in range(n_cols):
+        parts = []
+        for row_idx in range(n_rows):
+            val = df.iloc[row_idx, col_idx]
+            if pd.notna(val):
+                s = str(val).strip()
+                if s:
+                    parts.append(s.lower())
+        combined = "".join(parts).replace(" ", "").replace("\n", "")
+
+        if "фио" in combined:
+            result["fio"] = col_idx
+        if "категория" in combined:
+            result["category"] = col_idx
+        if "75" in combined and "лз" in combined:
+            result["75лз"] = col_idx
+        if ("тс" in combined or "tc" in combined) and "лз" in combined:
+            result["тслз"] = col_idx
+
+    if "fio" not in result and n_cols > 1:
+        result["fio"] = 1
+    return result
+
+
+def _parse_excel_discipline_list(df: pd.DataFrame, discipline: str,
+                                  category_filter: Optional[str] = None, header_rows: int = 3) -> Tuple[List[str], dict]:
+    """
+    Парсит Excel: строки 1–3 — заголовки, с 4-й — данные.
+    category_filter: "Мальчики"|"Юниорки"|"Юниоры"|"Девочки"|None (все)
+    """
+    cols = _detect_excel_discipline_columns(df, scan_rows=header_rows)
+    disc_col = cols.get("75лз") if discipline == "drone_individual" else cols.get("тслз")
+    fio_col = cols.get("fio", 1)
+    cat_col = cols.get("category", 3)
+
+    if disc_col is None:
+        return [], cols
+
+    names = []
+    for row_idx in range(header_rows, len(df)):
+        row = df.iloc[row_idx]
+        if fio_col >= len(row):
+            continue
+        name = str(row.iloc[fio_col]).strip() if pd.notna(row.iloc[fio_col]) else ""
+        if not name or name.lower() in ("nan", "none", ""):
+            continue
+        if disc_col < len(row):
+            cell = row.iloc[disc_col]
+            val = str(cell).strip() if pd.notna(cell) else ""
+            if val != "+":
+                continue
+        if category_filter and cat_col < len(row):
+            cat_val = str(row.iloc[cat_col]).strip() if pd.notna(row.iloc[cat_col]) else ""
+            if cat_val != category_filter:
+                continue
+        names.append(name)
+    return names, cols
+
+
 # ============================================================
 # Бизнес-логика: квалификация
 # ============================================================
@@ -2559,6 +2629,51 @@ with tabs[1]:
                         exec_many("INSERT INTO participants(tournament_id, name) VALUES(?,?)", rows)
                     st.success(f'{T("demo_added")}: {n_demo}')
                     st.rerun()
+
+            st.divider()
+            st.markdown("**📥 Импорт участников из Excel**")
+            st.caption("⚠️ Тестовая функция")
+            if is_team:
+                st.caption("Импорт для командного зачёта пока не поддерживается.")
+            else:
+                st.caption("Формат: колонка ФИО, Категория, колонки «75 ЛЗ» (дроны) и «ТС ЛЗ» (симулятор) с «+».")
+                excel_upload = st.file_uploader("Файл .xlsx или .xls", type=["xlsx", "xls"], key="excel_import")
+                category_filter = st.selectbox(
+                    "Категория",
+                    ["Все категории", "Мальчики", "Юниорки", "Юниоры", "Девочки"],
+                    key="excel_category"
+                )
+                if excel_upload is not None:
+                    if st.button("📥 Импортировать из Excel", key="excel_import_btn"):
+                        try:
+                            ext = excel_upload.name.lower().split(".")[-1]
+                            engine = "openpyxl" if ext == "xlsx" else "xlrd"
+                            df = pd.read_excel(excel_upload, engine=engine, header=None)
+                            if df.empty:
+                                st.warning("Файл пустой.")
+                            else:
+                                cat_val = None if category_filter == "Все категории" else category_filter
+                                names, detected = _parse_excel_discipline_list(df, discipline, category_filter=cat_val)
+                                added = 0
+                                if not names and detected.get("75лз") is None and detected.get("тслз") is None:
+                                    st.warning("Не найдены колонки «75 ЛЗ» или «ТС ЛЗ». Проверьте структуру файла.")
+                                elif not names:
+                                    disc_label = "75 ЛЗ" if discipline == "drone_individual" else "ТС ЛЗ"
+                                    st.warning(f"Нет участников с «+» в колонке {disc_label}.")
+                                else:
+                                    for name in names:
+                                        exec_sql("INSERT INTO participants(tournament_id, name) VALUES(?,?)",
+                                                 (tournament_id, name))
+                                        added += 1
+                                if added > 0:
+                                    st.success(f"Импортировано: {added}")
+                                    st.rerun()
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "xlrd" in err_msg or "xls" in err_msg.lower():
+                                st.error("Для .xls установите: pip install xlrd==1.2.0 (или сохраните файл как .xlsx)")
+                            else:
+                                st.error(f"Ошибка: {err_msg}")
 
     with col2:
         participants_raw = qdf("""SELECT id, start_number, name, COALESCE(disqualified,0) as disqualified
