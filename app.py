@@ -2143,7 +2143,6 @@ with st.sidebar:
         saved_id = st.session_state["selected_tournament"]
         if saved_id in id_to_name and id_to_name[saved_id] in options:
             default_idx = options.index(id_to_name[saved_id])
-        del st.session_state["selected_tournament"]
 
     sel = st.selectbox(T("select_tournament"), options, index=default_idx)
 
@@ -2154,6 +2153,8 @@ with st.sidebar:
     }
 
     if sel == T("create_new"):
+        if "selected_tournament" in st.session_state:
+            del st.session_state["selected_tournament"]
         st.subheader(T("create_new_header"))
         name = st.text_input(T("tournament_name"), value=f"Турнир {datetime.now().strftime('%d.%m.%Y')}")
         disc_key = st.selectbox(T("discipline"), list(DISCIPLINES.keys()),
@@ -2201,6 +2202,7 @@ with st.sidebar:
         tournament_id = None
     else:
         tournament_id = t_map[sel]
+        st.session_state["selected_tournament"] = tournament_id  # сохраняем для rerun после действий
 
         # Редактирование названия турнира
         rename_key = "rename_tournament_mode"
