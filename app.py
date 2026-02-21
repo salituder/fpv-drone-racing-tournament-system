@@ -2203,6 +2203,10 @@ with st.sidebar:
     st.divider()
 
     st.header("🏁 " + T("tournament"))
+    if st.session_state.get("tournament_just_created"):
+        st.session_state["tournament_just_created"] = False
+        if "tournament_selectbox" in st.session_state:
+            del st.session_state["tournament_selectbox"]
     tdf = qdf("SELECT * FROM tournaments ORDER BY id DESC")
     t_map = {f'{r["name"]}': int(r["id"]) for _, r in tdf.iterrows()} if not tdf.empty else {}
     id_to_name = {v: k for k, v in t_map.items()}
@@ -2211,7 +2215,9 @@ with st.sidebar:
     # Инициализация: после создания — tournament_select_init; при первом заходе — selected_tournament
     # Используем index только при инициализации, иначе виджет хранит выбор в key
     if "tournament_select_init" in st.session_state:
-        init_id = st.session_state.pop("tournament_select_init")
+        if "tournament_selectbox" in st.session_state:
+            del st.session_state["tournament_selectbox"]
+        init_id = int(st.session_state.pop("tournament_select_init"))
         init_name = id_to_name.get(init_id) if init_id in id_to_name else None
         default_idx = options.index(init_name) if init_name and init_name in options else 0
         sel = st.selectbox(T("select_tournament"), options, index=default_idx, key="tournament_selectbox")
@@ -2278,6 +2284,7 @@ with st.sidebar:
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
             st.session_state["selected_tournament"] = new_id
             st.session_state["tournament_select_init"] = new_id
+            st.session_state["tournament_just_created"] = True
             st.rerun()
         tournament_id = None
     else:
