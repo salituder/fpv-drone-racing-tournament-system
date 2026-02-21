@@ -2428,7 +2428,7 @@ with st.sidebar:
 
 # Все три дисциплины поддерживаются
 
-st.header(T("app_title"))
+st.title(str(tourn["name"]))
 
 # --- Навигация ---
 tabs = st.tabs([
