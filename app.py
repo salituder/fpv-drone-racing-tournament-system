@@ -2208,13 +2208,15 @@ with st.sidebar:
     id_to_name = {v: k for k, v in t_map.items()}
     options = [T("create_new")] + list(t_map.keys())
 
-    default_idx = 0
+    # Инициализируем selectbox при первом заходе или после создания турнира (без index, чтобы не перезаписывать выбор)
     if "selected_tournament" in st.session_state:
         saved_id = st.session_state["selected_tournament"]
         if saved_id in id_to_name and id_to_name[saved_id] in options:
-            default_idx = options.index(id_to_name[saved_id])
+            target_name = id_to_name[saved_id]
+            if "tournament_select" not in st.session_state:
+                st.session_state["tournament_select"] = target_name
 
-    sel = st.selectbox(T("select_tournament"), options, index=default_idx)
+    sel = st.selectbox(T("select_tournament"), options, key="tournament_select")
 
     DISCIPLINES = {
         "drone_individual": T("drone_individual"),
@@ -2267,7 +2269,9 @@ with st.sidebar:
                       int(qual_attempts_val), "setup",
                       datetime.now().isoformat(timespec="seconds")))
             new_id = int(qdf("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1").iloc[0]["id"])
+            new_name = qdf("SELECT name FROM tournaments WHERE id=?", (new_id,)).iloc[0]["name"]
             st.session_state["selected_tournament"] = new_id
+            st.session_state["tournament_select"] = str(new_name)
             st.rerun()
         tournament_id = None
     else:
@@ -2389,6 +2393,8 @@ with st.sidebar:
                         st.session_state[del_key] = False
                         if "selected_tournament" in st.session_state:
                             del st.session_state["selected_tournament"]
+                        if "tournament_select" in st.session_state:
+                            st.session_state["tournament_select"] = T("create_new")
                         st.success("✅ Турнир удалён!")
                         st.rerun()
                 with dc2:
