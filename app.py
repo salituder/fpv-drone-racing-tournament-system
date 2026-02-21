@@ -1807,7 +1807,7 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                 current_row += 2
 
                 if is_sim_export:
-                    # Sim final: show per-track/attempt results + final standings
+                    # Sim final: show per-track/attempt results + доп. вылеты + final standings
                     for tr in [1, 2]:
                         for att in [1, 2, 3]:
                             results = get_heat_results(stage_id_exp, 1, att, tr)
@@ -1821,6 +1821,28 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                                           "Время": format_time(r.get("time_seconds")),
                                           "Круги": r.get("laps_completed", "—"),
                                           "Очки": int(r.get("points", 0))} for r in results]
+                                df_heat = pd.DataFrame(tdata)
+                                current_row = write_df(ws_stage, df_heat, current_row)
+                                current_row += 1
+
+                    # Доп. вылеты (тайбрейкеры) для симулятора
+                    gid_sim_fin = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1", (stage_id_exp,))
+                    if not gid_sim_fin.empty:
+                        max_heat_sim = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=? AND track_no=1",
+                                           (int(gid_sim_fin.iloc[0]["id"]),))
+                        max_hn_sim = int(max_heat_sim.iloc[0]["mx"]) if not max_heat_sim.empty and max_heat_sim.iloc[0]["mx"] is not None else 0
+                        for tb_att in range(4, max_hn_sim + 1):
+                            tb_res = get_heat_results(stage_id_exp, 1, tb_att, track_no=1)
+                            if tb_res:
+                                ent = "Команда" if is_team_export else "Пилот"
+                                ws_stage.cell(row=current_row, column=1,
+                                              value=f"Доп. вылет #{tb_att - 3}").font = subheader_font
+                                ws_stage.cell(row=current_row, column=1).fill = subheader_fill
+                                current_row += 1
+                                tdata = [{"М": r["place"], ent: r["name"],
+                                          "Время": format_time(r.get("time_seconds")),
+                                          "Круги": r.get("laps_completed", "—"),
+                                          "Очки": int(r.get("points", 0))} for r in tb_res]
                                 df_heat = pd.DataFrame(tdata)
                                 current_row = write_df(ws_stage, df_heat, current_row)
                                 current_row += 1
@@ -1847,7 +1869,7 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                         df_fin = pd.DataFrame(fin_rows)
                         current_row = write_df(ws_stage, df_fin, current_row, medal_col=True)
                 else:
-                    # Drone final: 3 heats + standings
+                    # Drone final: 3 heats + доп. вылеты + standings
                     for heat_no in range(1, 4):
                         results = get_heat_results(stage_id_exp, 1, heat_no)
                         if results:
@@ -1864,6 +1886,29 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                             df_heat = pd.DataFrame(tdata)
                             current_row = write_df(ws_stage, df_heat, current_row)
                             current_row += 1
+
+                    # Доп. вылеты (тайбрейкеры) для дронов
+                    gid_fin = qdf("SELECT id FROM groups WHERE stage_id=? AND group_no=1", (stage_id_exp,))
+                    if not gid_fin.empty:
+                        max_heat_fin = qdf("SELECT MAX(heat_no) as mx FROM heats WHERE group_id=?",
+                                           (int(gid_fin.iloc[0]["id"]),))
+                        max_hn = int(max_heat_fin.iloc[0]["mx"]) if not max_heat_fin.empty and max_heat_fin.iloc[0]["mx"] is not None else 0
+                        for tb_no in range(4, max_hn + 1):
+                            tb_res = get_heat_results(stage_id_exp, 1, tb_no)
+                            if tb_res:
+                                ws_stage.cell(row=current_row, column=1,
+                                              value=f"Доп. вылет #{tb_no - 3}").font = subheader_font
+                                ws_stage.cell(row=current_row, column=1).fill = subheader_fill
+                                current_row += 1
+                                tdata = [{"М": r["place"], "Пилот": r["name"],
+                                          "Время": format_time(r.get("time_seconds")),
+                                          "Круги": r.get("laps_completed", "—"),
+                                          "Все": "Да" if r.get("completed_all_laps") else "",
+                                          "Расчётное": format_time(r.get("projected_time")),
+                                          "Очки": int(r.get("points", 0))} for r in tb_res]
+                                df_heat = pd.DataFrame(tdata)
+                                current_row = write_df(ws_stage, df_heat, current_row)
+                                current_row += 1
 
                     # Drone final standings
                     ws_stage.cell(row=current_row, column=1, value="ИТОГО ФИНАЛА").font = Font(bold=True, size=12)
@@ -1911,6 +1956,19 @@ def export_tournament_excel(tournament_id: int) -> bytes:
                                     df_heat = pd.DataFrame(tdata)
                                     current_row = write_df(ws_stage, df_heat, current_row)
                                     current_row += 1
+
+                        # Доп. вылет (тайбрейк) для плей-офф симулятора
+                        tb_po = get_heat_results(stage_id_exp, gno, 1, track_no=99)
+                        if tb_po:
+                            ws_stage.cell(row=current_row, column=1,
+                                          value=f"  Доп. вылет (тайбрейк)").font = Font(italic=True)
+                            current_row += 1
+                            tdata = [{"М": r["place"], ent: r["name"],
+                                      "Время": format_time(r.get("time_seconds")),
+                                      "Очки": int(r.get("points", 0))} for r in tb_po]
+                            df_heat = pd.DataFrame(tdata)
+                            current_row = write_df(ws_stage, df_heat, current_row)
+                            current_row += 1
 
                         # Group summary
                         sim_rank = compute_sim_group_ranking(stage_id_exp, gno, scoring_mode_exp)
