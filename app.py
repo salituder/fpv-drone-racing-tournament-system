@@ -2394,7 +2394,7 @@ with st.sidebar:
                         if "selected_tournament" in st.session_state:
                             del st.session_state["selected_tournament"]
                         if "tournament_select" in st.session_state:
-                            st.session_state["tournament_select"] = T("create_new")
+                            del st.session_state["tournament_select"]
                         st.success("✅ Турнир удалён!")
                         st.rerun()
                 with dc2:
