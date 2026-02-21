@@ -2636,8 +2636,9 @@ with tabs[1]:
             if is_team:
                 st.caption("Импорт для командного зачёта пока не поддерживается.")
             else:
-                st.caption("Формат: колонка ФИО, Категория, колонки «75 ЛЗ» (дроны) и «ТС ЛЗ» (симулятор) с «+».")
-                excel_upload = st.file_uploader("Файл .xlsx или .xls", type=["xlsx", "xls"], key="excel_import")
+                st.caption("Формат: колонка ФИО, Категория, колонки «75 ЛЗ» (дроны) и «ТС ЛЗ» (симулятор) с «+». "
+                          "Если файл в формате .xls — сохраните в Excel как .xlsx.")
+                excel_upload = st.file_uploader("Файл .xlsx", type=["xlsx"], key="excel_import")
                 category_filter = st.selectbox(
                     "Категория",
                     ["Все категории", "Мальчики", "Юниорки", "Юниоры", "Девочки"],
@@ -2646,8 +2647,7 @@ with tabs[1]:
                 if excel_upload is not None:
                     if st.button("📥 Импортировать из Excel", key="excel_import_btn"):
                         try:
-                            ext = excel_upload.name.lower().split(".")[-1]
-                            engine = "openpyxl" if ext == "xlsx" else "xlrd"
+                            engine = "openpyxl"
                             df = pd.read_excel(excel_upload, engine=engine, header=None)
                             if df.empty:
                                 st.warning("Файл пустой.")
@@ -2669,11 +2669,7 @@ with tabs[1]:
                                     st.success(f"Импортировано: {added}")
                                     st.rerun()
                         except Exception as e:
-                            err_msg = str(e)
-                            if "xlrd" in err_msg or "xls" in err_msg.lower():
-                                st.error("Для .xls установите: pip install xlrd==1.2.0 (или сохраните файл как .xlsx)")
-                            else:
-                                st.error(f"Ошибка: {err_msg}")
+                            st.error(f"Ошибка: {e}")
 
     with col2:
         participants_raw = qdf("""SELECT id, start_number, name, COALESCE(disqualified,0) as disqualified
