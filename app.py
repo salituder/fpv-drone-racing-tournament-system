@@ -763,8 +763,8 @@ def calc_projected_time(time_seconds: float, laps_completed: float, total_laps: 
 
 
 def _safe_time_for_input(seconds: float) -> float:
-    """Для number_input(max_value=999): 9999 (DSQ sentinel) и больше -> 0."""
-    if seconds is None or seconds > 999:
+    """Для number_input(max_value=999): 9999 (DSQ sentinel), NaN и больше -> 0."""
+    if seconds is None or (isinstance(seconds, float) and math.isnan(seconds)) or seconds > 999:
         return 0.0
     return float(seconds)
 
@@ -2054,7 +2054,7 @@ def export_tournament_excel(tournament_id: int) -> bytes:
 
 def format_time(seconds: Optional[float]) -> str:
     """Форматирует секунды в мм:сс.мс"""
-    if seconds is None:
+    if seconds is None or (isinstance(seconds, float) and math.isnan(seconds)):
         return "—"
     m = int(seconds) // 60
     s = seconds - m * 60
@@ -2818,6 +2818,8 @@ with tabs[2]:
                             att_row = attempts_map.get(att_no, {})
                             ex_time = float(att_row["time_seconds"]) if att_row.get("time_seconds") else 0.0
                             ex_laps = float(att_row["laps_completed"]) if att_row.get("laps_completed") else 0.0
+                            ex_time = _safe_time_for_input(ex_time)
+                            ex_laps = 0.0 if (isinstance(ex_laps, float) and math.isnan(ex_laps)) else max(0.0, min(99.0, ex_laps))
                             ex_all = bool(int(att_row.get("completed_all_laps", 0))) if att_no in attempts_map else False
 
                             st.markdown(f"**Вылет {att_no}**" + (" ✅" if att_no in attempts_map else ""))
@@ -2825,7 +2827,7 @@ with tabs[2]:
                             with c1:
                                 time_val = st.number_input(
                                     f"Время (сек)", min_value=0.0, max_value=999.0,
-                                    value=_safe_time_for_input(ex_time), step=0.001,
+                                    value=ex_time, step=0.001,
                                     key=f"qt_{pid}_{att_no}", format="%.3f")
                             with c2:
                                 laps_val = st.number_input(
