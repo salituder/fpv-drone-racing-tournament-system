@@ -1453,7 +1453,25 @@ def compute_overall_standings(tournament_id: int) -> pd.DataFrame:
                 placed_pids.add(pid)
                 current_place += 1
 
+    # Финальная пересортировка: дисквалифицированные — в конец каждого блока этапа
     if overall:
+        dsq_pids = get_disqualified_pids(tournament_id)
+        if dsq_pids:
+            result = []
+            i = 0
+            while i < len(overall):
+                stage = overall[i]["stage"]
+                block = []
+                while i < len(overall) and overall[i]["stage"] == stage:
+                    block.append(overall[i].copy())
+                    i += 1
+                non_dsq = [e for e in block if e["pid"] not in dsq_pids]
+                dsq_block = [e for e in block if e["pid"] in dsq_pids]
+                block = non_dsq + dsq_block
+                result.extend(block)
+            for idx, r in enumerate(result):
+                r["place"] = idx + 1
+            overall = result
         return pd.DataFrame(overall)
     return pd.DataFrame()
 
