@@ -1420,6 +1420,13 @@ def compute_overall_standings(tournament_id: int) -> pd.DataFrame:
                 else:
                     eliminated.sort(key=lambda x: x["sort_key"])
 
+                # Дисквалифицированные всегда в конце списка выбывших
+                dsq_pids = get_disqualified_pids(tournament_id)
+                if dsq_pids:
+                    non_dsq = [e for e in eliminated if e["pid"] not in dsq_pids]
+                    dsq_list = [e for e in eliminated if e["pid"] in dsq_pids]
+                    eliminated = non_dsq + dsq_list
+
                 for e in eliminated:
                     overall.append({
                         "place": current_place,
