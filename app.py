@@ -1467,6 +1467,8 @@ def compute_overall_standings(tournament_id: int) -> pd.DataFrame:
                     i += 1
                 non_dsq = [e for e in block if e["pid"] not in dsq_pids]
                 dsq_block = [e for e in block if e["pid"] in dsq_pids]
+                for e in dsq_block:
+                    e["detail"] = T("disqualified_full")
                 block = non_dsq + dsq_block
                 result.extend(block)
             for idx, r in enumerate(result):
